@@ -6,19 +6,46 @@ stayed with me, and a way to uncover what has shaped me as an artist.
 This is an **exploratory prototype**. See [DESIGN.md](DESIGN.md) for the structure, the reasoning
 behind it and the open questions.
 
-## Try it
+## Run it on your own computer (recommended)
 
-Open `index.html` in a browser. No install or server needed. For example:
+Double click **Start Memory Archive.command** (macOS), or run `node server.js` in this folder.
+The archive opens at http://localhost:4321. Needs [Node.js](https://nodejs.org) 18 or newer, nothing else.
 
-```sh
-open index.html          # macOS
-# or serve it:
-python3 -m http.server   # then visit http://localhost:8000
+Everything is stored as ordinary files in the `archief/` folder next to the app:
+
+```
+archief/
+  Notes/<title>.md     your own writing
+  Finds/<title>.md     things from outside
+  Works/<title>.md     your own pieces
+  media/               images, video, pdfs and other files, at full size
+  _archief/            collections.json and connections.json
+  _prullenbak/         everything you delete or replace is moved here first, never thrown away
 ```
 
-It starts with example entries so there is something to explore. Remove them with
-**Remove examples** at the bottom of the sidebar. Entries you made in an earlier version are
-carried over automatically (tags become collections).
+Each entry is a Markdown file with its details as frontmatter, so the folder can be opened in
+Obsidian or any text editor. Notes you add there (in `Notes/`, `Finds/` or `Works/`) show up in
+the archive after a reload; collections typed in their frontmatter become collections.
+
+With the server running, the archive can also do more than in the browser:
+
+- **Links are saved, not only bookmarked**: pasting a link fetches its title, description and
+  preview image, and keeps a copy of the page in `media/`.
+- **Full size media**: photos keep their original (large ones also get a lighter copy for display),
+  files of any size are kept, and video, audio and pdf play inside the entry.
+
+Options: `PORT=5000 node server.js` for another port, `ARCHIVE_DIR=/path/to/folder node server.js`
+to keep the archive somewhere else. Moving to another machine (a home server, for example) means
+copying this folder and running the same command there.
+
+### Moving over from the browser version
+
+Open the old version, click **Export** at the bottom of the sidebar, then **Import** that file in
+the local version. Embedded images become files in `media/`.
+
+## Try it without installing
+
+Open `index.html` in a browser, or visit the published page. Data is then kept in that browser only.
 
 ## How it's organised
 
@@ -76,10 +103,12 @@ hairline rules on a 12 column grid and `[ BRACKETED ]` actions.
 
 ## Storage and files
 
-Data is stored in this browser (IndexedDB), so each browser and device has its own archive. Use
+Through `server.js` the archive lives in a folder on disk (see above). Opened directly, data is
+stored in this browser (IndexedDB), so each browser and device has its own archive. Use
 **Export** in the sidebar for a JSON backup and **Import** to restore it. **Delete everything** empties
 the archive (with undo).
 
+- `server.js`: the local server (no dependencies)
 - `fonts/`: Familjen Grotesk and IBM Plex Mono (SIL Open Font License)
 - `vendor/`: [marked](https://github.com/markedjs/marked) (MIT) for Markdown and
   [DOMPurify](https://github.com/cure53/DOMPurify) (Apache 2.0 / MPL 2.0) to keep rendered HTML safe

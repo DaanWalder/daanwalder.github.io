@@ -170,7 +170,7 @@ Markdown is rendered with [marked](https://github.com/markedjs/marked) and clean
 
 Possible next steps, roughly from small to big:
 
-1. **Store entries as Markdown files** in a folder (readable in Obsidian), so the archive outlives any app.
+1. ~~**Store entries as Markdown files** in a folder (readable in Obsidian), so the archive outlives any app.~~ Done: `server.js`.
 2. **A small back-end** (e.g. Supabase or PocketBase) for sync, phone access and full-size photos.
 3. **Phone capture**: a share-sheet target / PWA so links and photos go in with one tap.
 4. **Suggestions**: propose collections and connections, describe images, fetch link titles.

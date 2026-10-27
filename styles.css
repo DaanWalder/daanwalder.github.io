@@ -660,3 +660,8 @@ html, body { overflow-x: clip; }
 }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* ================= embedded files (video, audio, pdf) ================= */
+.media-embed { display: block; width: 100%; margin: 0 0 16px; border: 1px solid var(--ink); background: var(--ink); }
+.media-embed--audio { background: none; border: 0; }
+.media-embed--pdf { height: min(80vh, 900px); background: #fff; }

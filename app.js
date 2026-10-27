@@ -2,7 +2,8 @@
    Entries come in three kinds (Notes, Finds, Works), live in Collections, can be marked Formative,
    and connect through explicit links (with a reason) and [[wiki links]] written in Markdown.
    Entries open in a side view over the list; the full page and editor are one click further.
-   Data is kept in this browser (IndexedDB, with localStorage as a fallback). */
+   Data is kept on disk when the app runs through server.js (Markdown files and media in a folder),
+   and otherwise in this browser (IndexedDB, with localStorage as a fallback). */
 (() => {
   'use strict';
 
@@ -20,7 +21,7 @@
   };
   const KIND_ORDER = ['work', 'note', 'find'];
   const FORMATS = { image: { label: 'Image', glyph: '◐' }, link: { label: 'Source', glyph: '↗' }, quote: { label: 'Quote', glyph: '“' }, file: { label: 'File', glyph: '▤' }, text: { label: 'Text', glyph: '¶' } };
-  const formatOf = e => e.image || e.swatch ? 'image' : e.file ? 'file' : e.url ? 'link' : e.kind === 'find' ? 'quote' : 'text';
+  const formatOf = e => e.page ? 'link' : e.image || e.swatch ? 'image' : e.file ? 'file' : e.url ? 'link' : e.kind === 'find' ? 'quote' : 'text';
   // A short note without structure reads as a thought
   const isThought = e => e.kind === 'note' && !e.image && !e.file && (e.body || '').length <= 280 && !/^\s*(#|[-*+] |\d+\. |>)/m.test(e.body || '');
   const GROUPS = { none: 'Nothing', year: 'Year', kind: 'Kind', collection: 'Collection', person: 'Person' };
@@ -49,6 +50,8 @@
   const LEGACY_KEY = 'memory-archive-v1';
   const FALLBACK_KEY = 'memory-archive-v2';
   const PREFS_KEY = 'memory-archive-prefs';
+  // Set at boot when the app is served by server.js; then the archive lives in a folder on disk
+  let SERVER = null;
   const store = {
     db: null,
     open() {
@@ -62,12 +65,18 @@
       });
     },
     async get(key) {
+      if (SERVER) { const r = await fetch('/api/db', { cache: 'no-store' }); if (!r.ok) throw new Error('read failed'); return r.json(); }
       try {
         const d = await this.open();
         return await new Promise((res, rej) => { const q = d.transaction('kv').objectStore('kv').get(key); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
       } catch { try { return JSON.parse(localStorage.getItem(FALLBACK_KEY)); } catch { return null; } }
     },
     async set(key, val) {
+      if (SERVER) {
+        const r = await fetch('/api/db', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(val) });
+        if (!r.ok) throw new Error('save failed');
+        return;
+      }
       try {
         const d = await this.open();
         await new Promise((res, rej) => { const t = d.transaction('kv', 'readwrite'); t.objectStore('kv').put(val, key); t.oncomplete = res; t.onerror = () => rej(t.error); });
@@ -81,9 +90,29 @@
   let db = { version: 2, entries: [], collections: [], links: [] };
   let saving = Promise.resolve();
   function persist() {
-    const snapshot = JSON.parse(JSON.stringify(db));
-    saving = saving.then(() => store.set('db', snapshot)).catch(() => toast('Could not save · export a backup'));
+    if (!SERVER) {
+      const snapshot = JSON.parse(JSON.stringify(db));
+      saving = saving.then(() => store.set('db', snapshot)).catch(() => toast('Could not save · export a backup'));
+      return saving;
+    }
+    // On disk: embedded images and files become files in media/ first, then the entries are written
+    saving = saving.then(async () => { await externalize(); await store.set('db', JSON.parse(JSON.stringify(db))); })
+      .catch(() => toast('Could not save · is the archive server still running?'));
     return saving;
+  }
+  const isData = v => typeof v === 'string' && v.startsWith('data:');
+  async function upload(src, name) {
+    const blob = typeof src === 'string' ? await (await fetch(src)).blob() : src;
+    const r = await fetch(`/api/media?name=${encodeURIComponent(name || 'file')}`, { method: 'POST', headers: { 'content-type': blob.type || 'application/octet-stream' }, body: blob });
+    if (!r.ok) throw new Error('upload failed');
+    return (await r.json()).url;
+  }
+  async function externalize() {
+    for (const e of db.entries) {
+      if (isData(e.image)) e.image = await upload(e.image, (e.title || 'image') + '.jpg');
+      if (e.file && isData(e.file.data)) e.file.data = await upload(e.file.data, e.file.name);
+      for (const [k, v] of Object.entries(e.assets || {})) if (isData(v)) e.assets[k] = await upload(v, 'image.jpg');
+    }
   }
 
   /* v1 (types, resonance, tags) → v2 (kinds, collections, formative) */
@@ -550,7 +579,21 @@
         : compact ? `<div class="body-wrap"><label class="visually-hidden" for="q-${e.id}">Note</label><textarea class="quick-note" id="q-${e.id}" data-field="body" placeholder="${esc(KINDS[e.kind].placeholder)}"></textarea></div>`
         : `<p class="muted">Nothing written yet. <a href="#/e/${e.id}/edit" style="text-decoration:underline">Write something</a>.</p>`}
       ${e.url ? `<a class="link" href="${esc(e.url)}" target="_blank" rel="noopener"><span>${esc(host(e.url) || e.url)} ↗</span></a>` : ''}
-      ${e.file ? (e.file.data ? `<a class="link" href="${e.file.data}" download="${esc(e.file.name)}"><span>Download ${esc(e.file.name)}</span></a>` : `<p class="label">▤ ${esc(e.file.name)} · only the name is stored</p>`) : ''}`;
+      ${e.original ? `<a class="link" href="${esc(e.original)}" target="_blank" rel="noopener"><span>Original image ↗</span></a>` : ''}
+      ${e.page ? `<a class="link" href="${esc(e.page)}" target="_blank" rel="noopener"><span>Saved copy of the page ↗</span></a>` : ''}
+      ${e.file ? fileView(e.file) : ''}`;
+  }
+  // Video, audio and pdf play inside the entry; everything else can be downloaded
+  function fileView(f) {
+    if (!f.data) return `<p class="label">▤ ${esc(f.name)} · only the name is stored</p>`;
+    const ext = (f.name.split('.').pop() || '').toLowerCase(), t = f.type || '', src = esc(f.data);
+    let embed = '';
+    if (!isData(f.data)) {
+      if (/^video\//.test(t) || /^(mp4|m4v|mov|webm)$/.test(ext)) embed = `<video class="media-embed" src="${src}" controls preload="metadata"></video>`;
+      else if (/^audio\//.test(t) || /^(mp3|wav|m4a|aac|ogg|flac)$/.test(ext)) embed = `<audio class="media-embed media-embed--audio" src="${src}" controls preload="metadata"></audio>`;
+      else if (t === 'application/pdf' || ext === 'pdf') embed = `<iframe class="media-embed media-embed--pdf" src="${src}" title="${esc(f.name)}"></iframe>`;
+    }
+    return `${embed}<a class="link" href="${src}" download="${esc(f.name)}"><span>Download ${esc(f.name)}</span></a>`;
   }
   const kicker = e => `<div class="kicker"><span class="label label--ink">${e.kind === 'find' ? FORMATS[formatOf(e)].glyph : KINDS[e.kind].glyph} ${kindLabel(e)}</span><span class="label">${KINDS[e.kind].date} ${fmtDate(e.date)}</span>${e.formative ? '<span class="label" style="color:var(--signal);display:inline-flex;gap:8px;align-items:center"><span class="f-mark"></span>Formative</span>' : ''}</div>`;
 
@@ -956,7 +999,7 @@
         kind: preset.kind || r.kind, title: preset.title || r.title || '', body: preset.body || '', url: preset.url || '',
         image: preset.image || null, file: preset.file || null, collections: ctx && colById(ctx) ? [ctx] : [],
       });
-      ui.draft._route = location.hash;
+      ui.draft._route = location.hash; ui.draftUrl = existing ? existing.url : '';
       ui.dirty = !!(preset.url || preset.image || preset.file || preset.body);
     }
     const d = ui.draft;
@@ -1052,8 +1095,8 @@
     colInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addCol(); } });
     colInput.addEventListener('change', () => { if (db.collections.some(c => norm(c.name) === norm(colInput.value))) addCol(); });
     $('#e-cols').addEventListener('click', e => { const b = e.target.closest('[data-uncol]'); if (b) { d.collections = d.collections.filter(id => id !== b.dataset.uncol); drawCols(); dirty(); } });
-    $('#dropbox').addEventListener('click', e => { if (e.target.closest('[data-clear]')) { e.preventDefault(); d.image = null; d.file = null; d.swatch = null; drawMedia(); dirty(); } });
-    $('#e-media').addEventListener('change', async e => { const f = e.target.files[0]; if (f) { Object.assign(d, { image: null, file: null, swatch: null }, await readMedia(f)); drawMedia(); dirty(); } e.target.value = ''; });
+    $('#dropbox').addEventListener('click', e => { if (e.target.closest('[data-clear]')) { e.preventDefault(); d.image = null; d.original = null; d.file = null; d.swatch = null; drawMedia(); dirty(); } });
+    $('#e-media').addEventListener('change', async e => { const f = e.target.files[0]; if (f) { Object.assign(d, { image: null, original: null, file: null, swatch: null }, await readMedia(f)); drawMedia(); dirty(); } e.target.value = ''; });
     $('#e-cancel').addEventListener('click', cancelEdit);
     const del = $('#e-delete'); if (del) del.addEventListener('click', () => deleteEntries([existing.id]));
     form.addEventListener('submit', e => { e.preventDefault(); saveDraft(existing); });
@@ -1061,7 +1104,7 @@
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveDraft(existing); }
       if (e.key === 'Enter' && e.target.tagName === 'INPUT' && e.target.id !== 'e-col') e.preventDefault();
     });
-    ui.setMedia = media => { Object.assign(d, { image: null, file: null, swatch: null }, media); drawMedia(); dirty(); };
+    ui.setMedia = media => { Object.assign(d, { image: null, original: null, file: null, swatch: null }, media); drawMedia(); dirty(); };
 
     $('.modes', form).addEventListener('click', e => {
       const b = e.target.closest('[data-mode]'); if (!b) return;
@@ -1184,6 +1227,7 @@
     delete clean._route;
     if (existing) Object.assign(existing, clean); else db.entries.push(clean);
     persist();
+    if (clean.url && !clean.page && clean.url !== ui.draftUrl) enrich(clean);
     ui.dirty = false; ui.draft = null; ui.skipGuard = true;
     toast(existing ? (n ? `Saved · updated ${plural(n, 'link')}` : 'Saved') : 'Added to the archive');
     go(`#/e/${clean.id}`);
@@ -1198,6 +1242,16 @@
 
   /* ================= media ================= */
   async function readMedia(file) {
+    if (SERVER) {
+      if (file.type.startsWith('image/')) {
+        // Keep the original; large photos also get a lighter copy to show in the archive
+        const original = await upload(file, file.name);
+        if (file.size < 1.5e6 || /svg|gif/.test(file.type)) return { image: original, original: null };
+        try { return { image: await upload(await downscale(file, 1600), file.name.replace(/\.[^.]+$/, '') + '-1600.jpg'), original }; }
+        catch { return { image: original, original: null }; }
+      }
+      return { file: { name: file.name, size: file.size, type: file.type, data: await upload(file, file.name) } };
+    }
     if (file.type.startsWith('image/')) return { image: await downscale(file, 1600) };
     return { file: { name: file.name, size: file.size, data: file.size < 4e6 ? await asDataUrl(file) : null } };
   }
@@ -1239,11 +1293,34 @@
     capture(out, out[0].image ? 'Image' : 'File');
   }
   function captureText(text) {
-    if (/^https?:\/\/\S+$/.test(text)) return capture([newEntry({ kind: 'find', url: text, title: host(text) || text })], 'Source');
+    if (/^https?:\/\/\S+$/.test(text)) {
+      const e = newEntry({ kind: 'find', url: text, title: host(text) || text });
+      capture([e], 'Source');
+      return enrich(e);
+    }
     const first = text.split('\n')[0].trim();
     const title = first.length > 90 ? first.slice(0, 88).replace(/\s\S*$/, '') + '…' : first;
     const body = text.trim() === first ? '' : text.trim();
     capture([newEntry({ kind: 'note', title, body: body || (first.length > 90 ? first : '') })], 'Thought');
+  }
+
+  // With the server running, a saved link gets its title, preview image and a copy of the page
+  async function enrich(e) {
+    if (!SERVER || !e.url) return;
+    let r;
+    try { r = await (await fetch(`/api/unfurl?url=${encodeURIComponent(e.url)}`)).json(); } catch { return; }
+    const live = byId(e.id);
+    if (!live) return;
+    if (r.error) return toast('Could not reach that page · the link is saved');
+    if (r.title && (!live.title || live.title === host(live.url) || live.title === live.url)) live.title = r.title;
+    if (r.image && !live.image) live.image = r.image;
+    if (r.file && !live.file) live.file = r.file;
+    if (r.by && !live.by) live.by = r.by;
+    if (r.description && !live.body) live.body = `> ${r.description}`;
+    if (r.page) live.page = r.page;
+    live.updated = now(); persist();
+    if (!isTyping(document.activeElement)) refresh();
+    toast('Page saved');
   }
 
   const uploadInput = $('#upload-input');
@@ -1471,6 +1548,11 @@ Her drawer was an archive too: [[Grandmother’s embroidery drawer]]. Next step:
 
   /* ================= boot ================= */
   (async () => {
+    try { const r = await fetch('/api/info', { cache: 'no-store' }); if (r.ok) { const info = await r.json(); if (info.server) SERVER = info; } } catch { /* static: browser storage */ }
+    if (SERVER) {
+      const foot = $('.side-foot > .label');
+      foot.textContent = 'Saved on disk'; foot.title = SERVER.root;
+    }
     let data = await store.get('db');
     if (!data) {
       let legacy = null;
