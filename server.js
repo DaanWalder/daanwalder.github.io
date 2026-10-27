@@ -140,8 +140,11 @@ async function load() {
     };
     await walk(dir);
   }
-  return { version: 2, entries, collections, links };
+  return { version: 2, rev: await readRev(), entries, collections, links };
 }
+// A revision number on disk, so a tab (or a second server) working from an older copy can't overwrite newer changes
+const REV = () => path.join(META, 'revision.json');
+const readRev = async () => (await readJson(REV(), { rev: 0 })).rev || 0;
 
 let queue = Promise.resolve();
 async function save(db) {
@@ -274,8 +277,16 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/db' && req.method === 'PUT') {
       const db = JSON.parse((await readBody(req, 5e8)).toString('utf8'));
       if (!db || !Array.isArray(db.entries)) return send(res, 400, { error: 'not an archive' });
-      const job = queue.then(() => save(db)); queue = job.catch(() => {});
-      return send(res, 200, { ok: true, written: await job });
+      const job = queue.then(async () => {
+        const rev = await readRev();
+        if (typeof db.rev === 'number' && db.rev !== rev) return { conflict: true, rev };
+        const written = await save(db);
+        await writeAtomic(REV(), JSON.stringify({ rev: rev + 1, at: new Date().toISOString() }));
+        return { written, rev: rev + 1 };
+      });
+      queue = job.catch(() => {});
+      const out = await job;
+      return send(res, out.conflict ? 409 : 200, { ok: !out.conflict, ...out });
     }
     if (p === '/api/media' && req.method === 'POST') {
       const name = u.searchParams.get('name') || 'file';

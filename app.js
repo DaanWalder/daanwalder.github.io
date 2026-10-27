@@ -74,7 +74,9 @@
     async set(key, val) {
       if (SERVER) {
         const r = await fetch('/api/db', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(val) });
+        if (r.status === 409) throw Object.assign(new Error('conflict'), { conflict: true });
         if (!r.ok) throw new Error('save failed');
+        db.rev = (await r.json()).rev;
         return;
       }
       try {
@@ -97,7 +99,12 @@
     }
     // On disk: embedded images and files become files in media/ first, then the entries are written
     saving = saving.then(async () => { await externalize(); await store.set('db', JSON.parse(JSON.stringify(db))); })
-      .catch(() => toast('Could not save · is the archive server still running?'));
+      .catch(async err => {
+        if (!err.conflict) return toast('Could not save · is the archive server still running?');
+        // Someone else saved first: take their version, so nothing newer is overwritten
+        db = migrate(await store.get('db')); db.entries.forEach(e => { e.collections ||= []; e.assets ||= {}; });
+        refresh(); toast('The archive changed elsewhere · reloaded, your last change was not saved');
+      });
     return saving;
   }
   const isData = v => typeof v === 'string' && v.startsWith('data:');
@@ -267,6 +274,7 @@
       case 'p': return L({ scope: 'person', name: p[1] || '' });
       case 'e': return byId(p[1]) ? { page: p[2] === 'edit' ? 'edit' : 'entry', id: p[1], tab: p[2] === 'lineage' ? 'lineage' : 'entry' } : L({ scope: 'all' });
       case 'new': return { page: 'edit', kind: KINDS[p[1]] ? p[1] : 'note', title: q.get('title') || '' };
+      case 'sort': return { page: 'sort', mode: SORT_MODES[p[1]] ? p[1] : 'all' };
       default: return L({ scope: 'all' });
     }
   }
@@ -289,6 +297,7 @@
         ${item('#/unsorted', 'Unsorted', unsorted, L && r.scope === 'unsorted', '○')}
         ${item('#/formative', 'Formative', db.entries.filter(e => e.formative).length, L && r.scope === 'formative', '<span class="f-mark"></span>')}
         <li><button class="nav-item" type="button" id="drift" style="width:100%" title="Open a random entry, older ones more likely"><span class="g">~</span><span>Drift</span><span class="n">↻</span></button></li>
+        ${item('#/sort', 'Sorting table', sortQueue('all').length, r.page === 'sort', '≡')}
       </ul></section>
       <section class="nav-sec"><div class="nav-head"><span class="label">Kinds</span></div><ul class="nav-list">
         ${KIND_ORDER.map(k => item(`#/kind/${k}`, KINDS[k].plural, db.entries.filter(e => e.kind === k).length, L && r.scope === 'kind' && r.kind === k, KINDS[k].glyph)).join('')}
@@ -361,7 +370,7 @@
     if (sim) { cancelAnimationFrame(sim.raf); sim = null; }
     const r = ui.route;
     if (ui.query && r.page !== 'edit') listPage({ page: 'list', scope: 'search' });
-    else ({ list: listPage, collections: collectionsPage, people: peoplePage, entry: entryPage, edit: editPage })[r.page](r);
+    else ({ list: listPage, collections: collectionsPage, people: peoplePage, entry: entryPage, edit: editPage, sort: sortPage })[r.page](r);
     renderSelbar();
     markOpen();
     ui.animate = false;
@@ -597,6 +606,114 @@
     return `${embed}<a class="link" href="${src}" download="${esc(f.name)}"><span>Download ${esc(f.name)}</span></a>`;
   }
   const kicker = e => `<div class="kicker"><span class="label label--ink">${e.kind === 'find' ? FORMATS[formatOf(e)].glyph : KINDS[e.kind].glyph} ${kindLabel(e)}</span><span class="label">${KINDS[e.kind].date} ${fmtDate(e.date)}</span>${e.formative ? '<span class="label" style="color:var(--signal);display:inline-flex;gap:8px;align-items:center"><span class="f-mark"></span>Formative</span>' : ''}</div>`;
+
+  /* ---------- sorting table: one entry at a time ---------- */
+  // Titles that only say what kind of thing it is, or where it was found
+  const needsName = e => {
+    const t = (e.title || '').trim();
+    return !t || /^(image|file|link|video|block|untitled( image| file| link)?)( from \S+)?$/i.test(t) || /^https?:\/\//i.test(t)
+      || /\.(png|jpe?g|gif|webp|heic|pdf|mp4|mov)\b/i.test(t) || /^\S{20,}$/.test(t) || /^[\w-]{1,12}$/.test(t) && /\d/.test(t) && /[a-z]/.test(t) && /[A-Z]/.test(t);
+  };
+  const openLinks = e => db.links.filter(l => (l.a === e.id || l.b === e.id) && !(l.note || '').trim() && byId(l.a) && byId(l.b));
+  // Ids of entries with at least one connection that has no reason yet
+  const openSet = () => { const s = new Set(); db.links.forEach(l => { if (!(l.note || '').trim()) { s.add(l.a); s.add(l.b); } }); return s; };
+  let openCache = null;
+  const hasOpen = e => (openCache || openSet()).has(e.id);
+  const SORT_MODES = {
+    all: { label: 'Everything', test: e => needsName(e) || hasOpen(e) || !e.collections.length },
+    reasons: { label: 'Reasons', test: hasOpen, hint: 'Connections without a why' },
+    names: { label: 'Names', test: needsName, hint: 'Entries with a placeholder title' },
+    unsorted: { label: 'Unsorted', test: e => !e.collections.length, hint: 'Entries without a collection' },
+  };
+  const sortQueue = mode => { openCache = openSet(); const out = db.entries.filter(e => e.kind !== 'work' && SORT_MODES[mode].test(e)).sort(byNewest); openCache = null; return out; };
+  function sortPage(r) {
+    const S = ui.sort && ui.sort.mode === r.mode ? ui.sort : (ui.sort = { mode: r.mode, list: sortQueue(r.mode).map(e => e.id), i: 0 });
+    // Move past entries that were sorted elsewhere in the meantime
+    while (S.i < S.list.length && (!byId(S.list[S.i]) || !SORT_MODES[S.mode].test(byId(S.list[S.i])))) S.i++;
+    const tabs = Object.entries(SORT_MODES).map(([k, m]) => `<a href="#/sort/${k}"${k === r.mode ? ' aria-current="page"' : ''}>${m.label} · ${sortQueue(k).length}</a>`).join('');
+    setBar([['Library', '#/all'], ['Sorting table']], S.i > 0 ? `<button class="action" type="button" data-sort-act="back"><span>← Back</span></button>` : '');
+    const e = byId(S.list[S.i]);
+    const left = S.list.length - S.i;
+    if (!e) {
+      main.innerHTML = `<section class="head"><h1>Sorting table</h1><p class="desc">One entry at a time: a name, a reason, a place.</p></section>
+        <nav class="tabs sort-tabs">${tabs}</nav><div class="empty"><p>Nothing left to sort here.</p><p class="hint">Everything in this list has a name, a reason and a place. Choose another list above, or come back after a few new finds.</p></div>`;
+      return;
+    }
+    const open = openLinks(e), done = neighbours(e.id).filter(n => n.link && (n.note || '').trim());
+    const media = e.image ? `<div class="sorter-img"><img src="${esc(e.image)}" alt=""></div>` : `<div class="sorter-plate">${plate(e, { big: true })}</div>`;
+    const cols = [...db.collections].sort((a, b) => a.name.localeCompare(b.name));
+    const placeholder = needsName(e);
+    main.innerHTML = `<section class="head head--sort"><h1>Sorting table<sup>${left} left</sup></h1><p class="desc">${esc(SORT_MODES[r.mode].hint || 'One entry at a time: a name, a reason, a place.')}. Save with <kbd>⌘</kbd><kbd>↵</kbd>, skip with <kbd>⌥</kbd><kbd>→</kbd>.</p></section>
+      <nav class="tabs sort-tabs">${tabs}</nav>
+      <article class="sorter" data-sort="${e.id}">
+        <div class="sorter-left">
+          ${media}
+          ${e.file ? fileView(e.file) : ''}
+          <p class="label sorter-src">${[kindLabel(e), `${KINDS[e.kind].date} ${fmtDate(e.date)}`, e.by ? `by ${esc(e.by)}` : ''].filter(Boolean).join(' · ')}</p>
+          <div class="sorter-links">
+            ${e.url ? `<a class="link" href="${esc(e.url)}" target="_blank" rel="noopener"><span>${esc(host(e.url) || 'Source')} ↗</span></a>` : ''}
+            ${e.page ? `<a class="link" href="${esc(e.page)}" target="_blank" rel="noopener"><span>Saved copy ↗</span></a>` : ''}
+            ${e.extra && e.extra.arena ? `<a class="link" href="${esc(e.extra.arena)}" target="_blank" rel="noopener"><span>On Are.na ↗</span></a>` : ''}
+            <a class="link" href="#/e/${e.id}"><span>Open page</span></a>
+          </div>
+        </div>
+        <form class="sorter-form" data-sort-form autocomplete="off">
+          <label class="label" for="s-title">Name${placeholder ? ' · now “' + esc(e.title) + '”' : ''}</label>
+          <input id="s-title" class="sorter-title" value="${placeholder ? '' : esc(e.title)}" placeholder="${placeholder ? 'What is it?' : esc(e.title)}">
+          <label class="label" for="s-why">Why it stayed with you</label>
+          <textarea id="s-why" rows="5" placeholder="${esc(KINDS[e.kind].placeholder)}">${esc(e.body || '')}</textarea>
+          ${open.length || done.length ? `<div class="sorter-conns"><span class="label">Connections · ${open.length ? `${open.length} without a reason` : 'all explained'}</span>
+            ${[...open.map(l => ({ l, other: byId(l.a === e.id ? l.b : l.a) })), ...done.map(n => ({ l: n.link, other: n.other }))].map(({ l, other }) => `
+              <label class="sorter-conn"><span>${other.kind === 'work' ? 'What did this give' : 'How does this relate to'} <a href="#/e/${other.id}">${esc(other.title)}</a>?</span>
+              <input data-link="${l.id}" value="${esc(l.note || '')}" placeholder="${other.kind === 'work' ? 'The part that fed the work' : 'The part that matters'}"></label>`).join('')}
+          </div>` : ''}
+          <div class="sorter-cols"><span class="label">Collections</span><div class="chips">
+            ${cols.map(c => `<button type="button" class="chip-t" data-col="${c.id}" aria-pressed="${e.collections.includes(c.id)}">${esc(c.name)}</button>`).join('')}
+          </div></div>
+          <div class="sorter-row"><button class="toggle" type="button" data-sort-formative aria-pressed="${!!e.formative}"><span class="box"></span>Formative</button></div>
+          <div class="sorter-actions">
+            <button class="action" type="submit"><span>Save &amp; next</span></button>
+            <button class="action" type="button" data-sort-act="skip"><span>Skip</span></button>
+            <span class="label">${S.i + 1} of ${S.list.length}</span>
+          </div>
+        </form>
+      </article>`;
+    const t = $('#s-title'); (placeholder ? t : (open.length ? $('[data-link]', main) : $('#s-why')) || t).focus({ preventScroll: true });
+  }
+  function sortSave() {
+    const S = ui.sort, f = $('[data-sort-form]', main); if (!S || !f) return;
+    const e = byId(S.list[S.i]); if (!e) return;
+    const title = $('#s-title').value.trim();
+    if (title && title !== e.title) renameEntry(e, title);
+    e.body = $('#s-why').value.trim();
+    $$('[data-link]', f).forEach(i => { const l = db.links.find(x => x.id === i.dataset.link); if (l) l.note = i.value.trim(); });
+    e.collections = $$('[data-col][aria-pressed="true"]', f).map(b => b.dataset.col);
+    e.formative = $('[data-sort-formative]', f).getAttribute('aria-pressed') === 'true';
+    e.updated = now(); persist();
+    S.i++; renderSide(); renderMain(); scrollTo({ top: 0 });
+  }
+  main.addEventListener('submit', ev => { if (ev.target.closest('[data-sort-form]')) { ev.preventDefault(); sortSave(); } });
+  document.addEventListener('click', ev => {
+    if (!ui.route || ui.route.page !== 'sort') return;
+    const c = ev.target.closest('[data-col]'); if (c && c.closest('.sorter')) { c.setAttribute('aria-pressed', c.getAttribute('aria-pressed') !== 'true'); return; }
+    const fm = ev.target.closest('[data-sort-formative]'); if (fm) { fm.setAttribute('aria-pressed', fm.getAttribute('aria-pressed') !== 'true'); return; }
+    const a = ev.target.closest('[data-sort-act]'); if (!a) return;
+    if (a.dataset.sortAct === 'skip') ui.sort.i++;
+    if (a.dataset.sortAct === 'back') ui.sort.i = Math.max(0, ui.sort.i - 1);
+    renderMain(); scrollTo({ top: 0 });
+  });
+  main.addEventListener('keydown', ev => {
+    if (!ui.route || ui.route.page !== 'sort') return;
+    if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); return sortSave(); }
+    if (ev.altKey && ev.key === 'ArrowRight') { ev.preventDefault(); ui.sort.i++; return renderMain(); }
+    if (ev.altKey && ev.key === 'ArrowLeft') { ev.preventDefault(); ui.sort.i = Math.max(0, ui.sort.i - 1); return renderMain(); }
+    // Enter in a one-line field moves on to the next field
+    if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') {
+      ev.preventDefault();
+      const fields = $$('.sorter-form input, .sorter-form textarea', main), k = fields.indexOf(ev.target);
+      if (fields[k + 1]) fields[k + 1].focus(); else sortSave();
+    }
+  });
 
   /* ---------- entry: full page ---------- */
   function entryPage(r) {
