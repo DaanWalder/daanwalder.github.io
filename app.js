@@ -21,7 +21,7 @@
   };
   const KIND_ORDER = ['work', 'note', 'find'];
   const FORMATS = { image: { label: 'Image', glyph: '◐' }, link: { label: 'Source', glyph: '↗' }, quote: { label: 'Quote', glyph: '“' }, file: { label: 'File', glyph: '▤' }, text: { label: 'Text', glyph: '¶' } };
-  const formatOf = e => e.page ? 'link' : e.image || e.swatch ? 'image' : e.file ? 'file' : e.url ? 'link' : e.kind === 'find' ? 'quote' : 'text';
+  const formatOf = e => FORMATS[e.format] ? e.format : e.page ? 'link' : e.image || e.swatch ? 'image' : e.file ? 'file' : e.url ? 'link' : e.kind === 'find' ? 'quote' : 'text';
   // A short note without structure reads as a thought
   const isThought = e => e.kind === 'note' && !e.image && !e.file && (e.body || '').length <= 280 && !/^\s*(#|[-*+] |\d+\. |>)/m.test(e.body || '');
   const GROUPS = { none: 'Nothing', year: 'Year', kind: 'Kind', collection: 'Collection', person: 'Person' };
@@ -581,6 +581,7 @@
       ${e.url ? `<a class="link" href="${esc(e.url)}" target="_blank" rel="noopener"><span>${esc(host(e.url) || e.url)} ↗</span></a>` : ''}
       ${e.original ? `<a class="link" href="${esc(e.original)}" target="_blank" rel="noopener"><span>Original image ↗</span></a>` : ''}
       ${e.page ? `<a class="link" href="${esc(e.page)}" target="_blank" rel="noopener"><span>Saved copy of the page ↗</span></a>` : ''}
+      ${e.extra && e.extra.arena ? `<a class="link" href="${esc(e.extra.arena)}" target="_blank" rel="noopener"><span>On Are.na ↗</span></a>` : ''}
       ${e.file ? fileView(e.file) : ''}`;
   }
   // Video, audio and pdf play inside the entry; everything else can be downloaded

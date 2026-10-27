@@ -43,6 +43,20 @@ copying this folder and running the same command there.
 Open the old version, click **Export** at the bottom of the sidebar, then **Import** that file in
 the local version. Embedded images become files in `media/`.
 
+### Importing from Are.na
+
+With the archive running, open a second Terminal window in this folder and run:
+
+```sh
+node tools/import-arena.js <your are.na username>
+```
+
+Every block becomes an entry (title, description, source, maker, date found, image or file,
+comments) and every channel a collection. It can be run again: only new blocks are added, so you
+can keep using Are.na while moving over. Large imports stop after a few minutes; run the same
+command again to continue the downloads. Images come in at Are.na's large size (up to 1800 px),
+attachments such as pdfs and videos at full quality.
+
 ## Try it without installing
 
 Open `index.html` in a browser, or visit the published page. Data is then kept in that browser only.
