@@ -450,9 +450,9 @@ a.pill:hover { border-color: var(--signal); color: var(--signal); }
 .gens > svg path { fill: none; stroke: var(--hairline); stroke-width: 1; transition: stroke .2s; }
 .gens > svg path.is-mention { stroke-dasharray: 2 4; }
 .gens > svg path.is-hot { stroke: var(--signal); stroke-width: 1.5; }
-.gen { position: relative; z-index: 1; display: grid; align-content: start; }
+.gen { position: relative; z-index: 1; display: grid; align-content: start; min-width: 0; }
 .gen-head { display: flex; justify-content: space-between; padding: 10px 0; border-top: 1.5px solid var(--ink); margin-bottom: 4px; }
-.kin { display: grid; grid-template-columns: 40px 1fr; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--hairline); text-align: left; background: var(--paper); transition: opacity .2s; }
+.kin { display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--hairline); text-align: left; background: var(--paper); transition: opacity .2s; }
 .kin .plate { aspect-ratio: 1; }
 .kin .plate--text { padding: 0; align-items: center; justify-content: center; }
 .kin .plate--text .q, .kin .plate--text .label, .kin .plate .ph { display: none; }

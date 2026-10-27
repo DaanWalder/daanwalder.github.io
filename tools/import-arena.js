@@ -49,6 +49,24 @@ async function pages(url) {
   }
 }
 const readJson = async (f, fb) => { try { return JSON.parse(await fsp.readFile(f, 'utf8')); } catch { return fb; } };
+// The public API cannot see private channels. Their contents can be added as arena-private.json
+// (same shape: channels, blocks, membership, nested), exported with your Are.na login.
+async function loadData() {
+  const data = await readJson(path.join(CACHE, 'arena.json'));
+  if (!data) return null;
+  const extra = await readJson(path.join(CACHE, 'arena-private.json'));
+  if (extra) {
+    const ids = new Set(data.blocks.map(b => b.id)), slugs = new Set(data.channels.map(c => c.slug));
+    data.channels.push(...extra.channels.filter(c => !slugs.has(c.slug)));
+    data.blocks.push(...extra.blocks.filter(b => !ids.has(b.id)));
+    for (const [id, list] of Object.entries(extra.membership)) {
+      const have = data.membership[id] ||= [];
+      for (const m of list) if (!have.some(h => h.slug === m.slug)) have.push(m);
+    }
+    data.nested.push(...extra.nested);
+  }
+  return data;
+}
 const writeJson = (f, v) => fsp.writeFile(f, JSON.stringify(v, null, 1));
 
 /* ================= 1. fetch ================= */
@@ -105,7 +123,7 @@ async function download(url, name, fallbackExt) {
 const imageUrl = img => img && ((img.large && (img.large.src_2x || img.large.src)) || (img.medium && img.medium.src) || img.src);
 
 async function media() {
-  const data = await readJson(path.join(CACHE, 'arena.json'));
+  const data = await loadData();
   if (!data) throw new Error('run fetch first');
   const doneFile = path.join(CACHE, 'media.json');
   const done = await readJson(doneFile, {});
@@ -147,7 +165,7 @@ const md = d => (d && (d.markdown || d.plain)) || (typeof d === 'string' ? d : '
 const host = u => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
 
 async function write() {
-  const data = await readJson(path.join(CACHE, 'arena.json'));
+  const data = await loadData();
   const done = await readJson(path.join(CACHE, 'media.json'), {});
   const PORT = +process.env.PORT || 4321;
   const base = `http://127.0.0.1:${PORT}`;
@@ -178,8 +196,13 @@ async function write() {
   const mine = b => b.user && b.user.slug === USER;
   for (const b of data.blocks) {
     const id = 'arena-' + b.id;
-    if (have.has(id)) continue;
     const mem = data.membership[b.id] || [];
+    if (have.has(id)) {
+      // Already imported: only add channels it was not in yet
+      const ex = db.entries.find(e => e.id === id);
+      for (const m of mem) { const c = colFor.get(m.slug); if (c && !ex.collections.includes(c)) ex.collections.push(c); }
+      continue;
+    }
     const found = [b.created_at, ...mem.map(m => m.at)].filter(Boolean).sort()[0] || b.created_at;
     const src = b.source || {};
     const desc = md(b.description).trim();
