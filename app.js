@@ -88,6 +88,21 @@
   const prefs = { display: 'list', group: 'year', mode: 'split' };
   try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREFS_KEY)) || {}); } catch { /* defaults */ }
   const savePrefs = () => { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* ignore */ } };
+  // Theme: auto follows the system; light and dark are fixed. Set before first paint in index.html too.
+  const THEMES = ['auto', 'light', 'dark'];
+  function applyTheme() {
+    const t = THEMES.includes(prefs.theme) ? prefs.theme : 'auto', h = document.documentElement;
+    if (t === 'auto') delete h.dataset.theme; else h.dataset.theme = t;
+    const btn = document.getElementById('theme'); if (btn) btn.textContent = `Theme: ${t[0].toUpperCase()}${t.slice(1)}`;
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.content = getComputedStyle(h).getPropertyValue('--paper').trim() || '#f1f0eb';
+  }
+  applyTheme();
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
+  document.getElementById('theme').addEventListener('click', () => {
+    prefs.theme = THEMES[(THEMES.indexOf(prefs.theme || 'auto') + 1) % THEMES.length]; savePrefs(); applyTheme();
+    if (prefs.display === 'graph' && ui.route && ui.route.page === 'list') renderMain();
+  });
 
   let db = { version: 2, entries: [], collections: [], links: [] };
   let saving = Promise.resolve();
@@ -1037,7 +1052,7 @@
     return `<div class="field-wrap${ui.animate ? ' rise' : ''}">
       <svg role="img" aria-label="Graph of entries and their connections"></svg>
       <div class="field-hud top">
-        <div class="legend label"><span><i style="background:var(--paper)"></i>Find</span><span><i style="background:var(--on-dark-muted)"></i>Note</span><span><i class="ring"></i>Work</span><span><i style="background:var(--signal-light)"></i>Formative</span><span><i class="ls"></i>Connection</span><span><i class="ln"></i>Mention</span></div>
+        <div class="legend label"><span><i style="background:var(--on-night)"></i>Find</span><span><i style="background:var(--on-dark-muted)"></i>Note</span><span><i class="ring"></i>Work</span><span><i style="background:var(--signal-light)"></i>Formative</span><span><i class="ls"></i>Connection</span><span><i class="ln"></i>Mention</span></div>
         <span class="label" id="field-count"></span>
       </div>
       <div class="field-hud bottom">

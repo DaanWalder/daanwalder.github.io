@@ -155,6 +155,26 @@ async function media() {
 }
 
 /* ================= 3. write ================= */
+// Page titles carry their site around: "GitHub - owner/repo: …", "Topic - Wikipedia", "Post | Site"
+const SITES = /^(youtube|wikipedia|pinterest|instagram|behance|vimeo|medium|are\.na|tumblr|facebook|twitter|x|linkedin|etsy|aliexpress|amazon|google drive|google search|reddit|hornbach|gamma|e-flux|archined|savee|dezeen|designboom|creative boom|creativeapplications\.net|fast company|yanko design|allerhande|albert heijn)$/i;
+function cleanTitle(t, url) {
+  let s = String(t || '').replace(/\s+/g, ' ').trim();
+  if (!s) return s;
+  const gh = s.match(/^GitHub - ([^/\s]+)\/([^:\s]+)(?::\s*(.+))?$/);
+  if (gh) return `${gh[2]} (${gh[1]})`;
+  const g = s.match(/^(.+?) - Google (Search|Zoeken)$/i);
+  if (g) return g[1].charAt(0).toUpperCase() + g[1].slice(1);
+  s = s.replace(/^\(\d+\)\s*/, '');
+  let host = ''; try { host = new URL(url).hostname.replace(/^www\./, '').split('.').slice(-2, -1)[0] || ''; } catch { /* none */ }
+  for (let i = 0; i < 3; i++) {
+    const m = s.match(/^(.*\S)\s+[|\-–—•·]\s+([^|\-–—•·]{1,40})$/);
+    if (!m) break;
+    const tail = m[2].trim().toLowerCase();
+    if (SITES.test(tail) || (host && tail.replace(/[^a-z0-9]/g, '').includes(host.toLowerCase()))) s = m[1].trim(); else break;
+  }
+  return s;
+}
+
 // Titles that say nothing: file names, page chrome, bot checks
 const isFileName = t => !t || !t.trim() || [/\.(png|jpe?g|gif|webp|heic|avif|pdf|mp4|mov|mp3|wav)\b/i, /^\(\d+\)\s*pinterest/i, /^(pinterest|instagram|image|untitled|img[_ -]?\d+|screenshot[\s\d_-]*)$/i,
   /^just a moment/i, /^\S{32,}$/, /^[\w-]{20,}$/, /^attention required/i, /security service to protect/i, /^pin page$/i, /^\d{6,}_/].some(re => re.test(t.trim()));
@@ -206,7 +226,7 @@ async function write() {
     const found = [b.created_at, ...mem.map(m => m.at)].filter(Boolean).sort()[0] || b.created_at;
     const src = b.source || {};
     const desc = md(b.description).trim();
-    let title = (b.title || '').trim();
+    let title = cleanTitle((b.title || '').trim(), src.url);
     if (isFileName(title)) title = !isFileName(src.title) ? src.title : '';
     if (!title && b.type === 'Text') title = md(b.content).split('\n')[0].replace(/^[#>*\s-]+/, '').slice(0, 90);
     if (!title && desc) { const first = desc.replace(/[#>*_\[\]]/g, '').split(/(?<=[.!?])\s|\n/)[0].trim(); if (first.length > 3) title = first.length > 90 ? first.slice(0, 88).replace(/\s\S*$/, '') + '…' : first; }
@@ -214,6 +234,9 @@ async function write() {
     let by = (b.embed && b.embed.author_name) || '';
     const ig = (src.title || '').match(/^Instagram (?:post|reel|photo|video) (?:from|by) @?(.+)$/i);
     if (!by && ig) by = ig[1];
+    // Handles read like names: "draaimolen_" → "Draaimolen", emoji and decoration dropped
+    by = by.replace(/[\u{1F000}-\u{1FFFF}\u2600-\u27BF\u2B00-\u2BFF]/gu, '').replace(/^[@\s]+|[\s_.,!]+$/g, '').trim();
+    if (by && by === by.toLowerCase() && /^[a-z][a-z0-9_.]*$/.test(by)) by = by.replace(/[_.]+/g, ' ').trim().replace(/^./, c => c.toUpperCase());
     let body = '';
     if (b.type === 'Text') body = md(b.content);
     else if (desc) body = (b.type === 'Link' || b.type === 'Embed' || !mine(b)) ? desc.split('\n').map(l => '> ' + l).join('\n') : desc;

@@ -198,6 +198,26 @@ async function storeMedia(buf, name, type) {
 }
 
 /* ================= saving web pages ================= */
+// Page titles carry their site around: "GitHub - owner/repo: …", "Topic - Wikipedia", "Post | Site"
+const SITES = /^(youtube|wikipedia|pinterest|instagram|behance|vimeo|medium|are\.na|tumblr|facebook|twitter|x|linkedin|etsy|aliexpress|amazon|google drive|google search|reddit|hornbach|gamma|e-flux|archined|savee|dezeen|designboom|creative boom|creativeapplications\.net|fast company|yanko design|allerhande|albert heijn)$/i;
+function cleanTitle(t, url) {
+  let s = String(t || '').replace(/\s+/g, ' ').trim();
+  if (!s) return s;
+  const gh = s.match(/^GitHub - ([^/\s]+)\/([^:\s]+)(?::\s*(.+))?$/);
+  if (gh) return `${gh[2]} (${gh[1]})`;
+  const g = s.match(/^(.+?) - Google (Search|Zoeken)$/i);
+  if (g) return g[1].charAt(0).toUpperCase() + g[1].slice(1);
+  s = s.replace(/^\(\d+\)\s*/, '');
+  let host = ''; try { host = new URL(url).hostname.replace(/^www\./, '').split('.').slice(-2, -1)[0] || ''; } catch { /* none */ }
+  for (let i = 0; i < 3; i++) {
+    const m = s.match(/^(.*\S)\s+[|\-–—•·]\s+([^|\-–—•·]{1,40})$/);
+    if (!m) break;
+    const tail = m[2].trim().toLowerCase();
+    if (SITES.test(tail) || (host && tail.replace(/[^a-z0-9]/g, '').includes(host.toLowerCase()))) s = m[1].trim(); else break;
+  }
+  return s;
+}
+
 const meta = (html, ...names) => {
   for (const n of names) {
     const re = new RegExp(`<meta[^>]+(?:property|name)=["']${n}["'][^>]*>`, 'i');
@@ -235,7 +255,7 @@ async function unfurl(url) {
   // <base> keeps its images and styles loading from the original site while it is still online
   const withBase = html.replace(/<head[^>]*>/i, m => `${m}<base href="${res.url.replace(/"/g, '%22')}">`);
   const page = await storeMedia(Buffer.from(`<!-- saved from ${url} on ${new Date().toISOString()} -->\n` + withBase), safeName(title || 'page').slice(0, 40) + '.html', 'text/html');
-  return { title, description, by: by && by !== title ? by : '', image, page };
+  return { title: cleanTitle(title, res.url), description, by: by && by !== title ? by : '', image, page };
 }
 
 /* ================= http ================= */
