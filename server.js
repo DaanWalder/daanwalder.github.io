@@ -32,7 +32,7 @@ const MEDIA = path.join(ROOT, 'media');
 const META = path.join(ROOT, '_archief');
 const TRASH = path.join(ROOT, '_prullenbak');
 // Frontmatter keys in a fixed order, so files stay tidy and diffs stay small
-const FIELDS = ['id', 'kind', 'format', 'title', 'date', 'by', 'url', 'formative', 'collections', 'image', 'file', 'swatch', 'assets', 'original', 'page', 'example', 'created', 'updated'];
+const FIELDS = ['id', 'kind', 'format', 'title', 'date', 'by', 'url', 'formative', 'collections', 'image', 'file', 'swatch', 'assets', 'original', 'page', 'documents', 'example', 'created', 'updated'];
 
 /* ================= files ================= */
 async function ensureDirs() {

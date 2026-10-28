@@ -704,3 +704,19 @@ html, body { overflow-x: clip; }
 /* long unbroken titles (urls, file names) wrap instead of stretching tiles */
 .tile { min-width: 0; }
 .tile h3, .plate--text .q, .row .t, .entry h1, .kin h3, .panel-title { overflow-wrap: anywhere; }
+
+/* ================= documentation of a work ================= */
+.doc-of { display: flex; gap: 8px; align-items: center; color: var(--graphite); }
+.doc-of a { color: var(--ink); text-decoration: underline; text-decoration-color: var(--hairline); text-underline-offset: 3px; }
+.doc-of a:hover { color: var(--signal); }
+.docs { display: grid; gap: 10px; padding-top: 10px; border-top: 1.5px solid var(--ink); }
+.docs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+.doc .plate { aspect-ratio: 1; }
+.doc:hover .plate { outline: 1.5px solid var(--signal); outline-offset: 2px; }
+
+/* sorting table: one work at a time, and connections that don't belong */
+.sort-work { margin-left: auto; display: flex; gap: 10px; align-items: center; padding-bottom: 8px; }
+.sort-work select { font: 13px var(--sans, inherit); background: transparent; border: 0; border-bottom: 1px solid var(--ink); padding: 2px 0; color: var(--ink); max-width: 320px; }
+.conn-row { display: flex; gap: 14px; align-items: end; }
+.conn-row input { flex: 1; min-width: 0; }
+.conn-row [data-unlink] { white-space: nowrap; padding-bottom: 10px; }

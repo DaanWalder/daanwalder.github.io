@@ -161,6 +161,8 @@
     }));
     return rel;
   }
+  // Entries that document a Work (photos of the piece, the exhibition), rather than feed it
+  const docsOf = id => db.entries.filter(d => d.documents === id).sort(byNewest);
   const neighbours = (id, rel = relations()) => rel.filter(r => r.a === id || r.b === id).map(r => ({ ...r, other: byId(r.a === id ? r.b : r.a) }));
   const backlinks = id => db.entries.filter(e => e.id !== id && mentionsOf(e).includes(id));
   const people = () => {
@@ -274,7 +276,7 @@
       case 'p': return L({ scope: 'person', name: p[1] || '' });
       case 'e': return byId(p[1]) ? { page: p[2] === 'edit' ? 'edit' : 'entry', id: p[1], tab: p[2] === 'lineage' ? 'lineage' : 'entry' } : L({ scope: 'all' });
       case 'new': return { page: 'edit', kind: KINDS[p[1]] ? p[1] : 'note', title: q.get('title') || '' };
-      case 'sort': return { page: 'sort', mode: SORT_MODES[p[1]] ? p[1] : 'all' };
+      case 'sort': return { page: 'sort', mode: SORT_MODES[p[1]] ? p[1] : 'all', work: p[1] === 'reasons' && byId(p[2]) ? p[2] : null };
       default: return L({ scope: 'all' });
     }
   }
@@ -583,7 +585,10 @@
       : `<div class="meta-block"><span class="label">Details</span><p class="v">${kindLabel(e)}<br>${k.date} ${fmtDate(e.date)}${e.by ? `<br>by ${esc(e.by)}` : ''}<br><span class="muted">Added ${fmtDate((e.created || '').slice(0, 10))}</span></p></div>`}`;
   }
   function mediaAndText(e, { compact = false } = {}) {
-    return `${e.image || e.swatch ? `<div class="hero-media">${plate(e, { big: true })}</div>` : ''}
+    const docs = e.kind === 'work' ? docsOf(e.id) : [], of = e.documents && byId(e.documents);
+    return `${of ? `<p class="doc-of label"><span class="g">◆</span> Documentation of <a href="#/e/${of.id}">${esc(of.title)}</a></p>` : ''}
+      ${e.image || e.swatch ? `<div class="hero-media">${plate(e, { big: true })}</div>` : ''}
+      ${docs.length ? `<section class="docs"><span class="label">Documentation · ${docs.length}</span><div class="docs-grid">${docs.map(d => `<a class="doc" href="${compact ? entryHref(d.id) : '#/e/' + d.id}" title="${esc(d.title)}">${plate(d)}</a>`).join('')}</div></section>` : ''}
       ${e.body ? `<div class="md">${renderMd(e.body, e)}</div>`
         : compact ? `<div class="body-wrap"><label class="visually-hidden" for="q-${e.id}">Note</label><textarea class="quick-note" id="q-${e.id}" data-field="body" placeholder="${esc(KINDS[e.kind].placeholder)}"></textarea></div>`
         : `<p class="muted">Nothing written yet. <a href="#/e/${e.id}/edit" style="text-decoration:underline">Write something</a>.</p>`}
@@ -611,6 +616,7 @@
   // Titles that only say what kind of thing it is, or where it was found
   const needsName = e => {
     const t = (e.title || '').trim();
+    if (e.extra && e.extra.needs_name) return true;
     return !t || /^(image|file|link|video|block|untitled( image| file| link)?)( from \S+)?$/i.test(t) || /^https?:\/\//i.test(t)
       || /\.(png|jpe?g|gif|webp|heic|pdf|mp4|mov)\b/i.test(t) || /^\S{20,}$/.test(t) || /^[\w-]{1,12}$/.test(t) && /\d/.test(t) && /[a-z]/.test(t) && /[A-Z]/.test(t);
   };
@@ -625,12 +631,22 @@
     names: { label: 'Names', test: needsName, hint: 'Entries with a placeholder title' },
     unsorted: { label: 'Unsorted', test: e => !e.collections.length, hint: 'Entries without a collection' },
   };
-  const sortQueue = mode => { openCache = openSet(); const out = db.entries.filter(e => e.kind !== 'work' && SORT_MODES[mode].test(e)).sort(byNewest); openCache = null; return out; };
+  // In Reasons, one Work at a time keeps the question the same from entry to entry
+  const openFor = (e, work) => openLinks(e).filter(l => !work || l.a === work || l.b === work);
+  const sortQueue = (mode, work) => {
+    openCache = openSet();
+    let out = db.entries.filter(e => e.kind !== 'work' && SORT_MODES[mode].test(e));
+    if (work) out = out.filter(e => openFor(e, work).length);
+    openCache = null; return out.sort(byNewest);
+  };
+  const worksWithOpen = () => db.entries.filter(w => w.kind === 'work').map(w => ({ w, n: db.links.filter(l => (l.a === w.id || l.b === w.id) && !(l.note || '').trim()).length })).filter(x => x.n).sort((a, b) => b.n - a.n);
   function sortPage(r) {
-    const S = ui.sort && ui.sort.mode === r.mode ? ui.sort : (ui.sort = { mode: r.mode, list: sortQueue(r.mode).map(e => e.id), i: 0 });
+    const S = ui.sort && ui.sort.mode === r.mode && ui.sort.work === r.work ? ui.sort : (ui.sort = { mode: r.mode, work: r.work, list: sortQueue(r.mode, r.work).map(e => e.id), i: 0 });
     // Move past entries that were sorted elsewhere in the meantime
-    while (S.i < S.list.length && (!byId(S.list[S.i]) || !SORT_MODES[S.mode].test(byId(S.list[S.i])))) S.i++;
-    const tabs = Object.entries(SORT_MODES).map(([k, m]) => `<a href="#/sort/${k}"${k === r.mode ? ' aria-current="page"' : ''}>${m.label} · ${sortQueue(k).length}</a>`).join('');
+    const still = e => SORT_MODES[S.mode].test(e) && (!S.work || openFor(e, S.work).length);
+    while (S.i < S.list.length && (!byId(S.list[S.i]) || !still(byId(S.list[S.i])))) S.i++;
+    const tabs = Object.entries(SORT_MODES).map(([k, m]) => `<a href="#/sort/${k}"${k === r.mode ? ' aria-current="page"' : ''}>${m.label} · ${sortQueue(k).length}</a>`).join('')
+      + (r.mode === 'reasons' ? `<label class="sort-work label">Work <select data-sort-work><option value="">All works</option>${worksWithOpen().map(({ w, n }) => `<option value="${w.id}"${w.id === r.work ? ' selected' : ''}>${esc(w.title)} · ${n}</option>`).join('')}</select></label>` : '');
     setBar([['Library', '#/all'], ['Sorting table']], S.i > 0 ? `<button class="action" type="button" data-sort-act="back"><span>← Back</span></button>` : '');
     const e = byId(S.list[S.i]);
     const left = S.list.length - S.i;
@@ -642,7 +658,9 @@
     const open = openLinks(e), done = neighbours(e.id).filter(n => n.link && (n.note || '').trim());
     const media = e.image ? `<div class="sorter-img"><img src="${esc(e.image)}" alt=""></div>` : `<div class="sorter-plate">${plate(e, { big: true })}</div>`;
     const cols = [...db.collections].sort((a, b) => a.name.localeCompare(b.name));
-    const placeholder = needsName(e);
+    const placeholder = needsName(e), guess = !!(e.extra && e.extra.needs_name);
+    let was = ''; try { was = e.extra && e.extra.original_title ? JSON.parse(e.extra.original_title) : ''; } catch { was = e.extra.original_title; }
+    if (S.work) open.sort((x, y) => ((y.a === S.work || y.b === S.work) - (x.a === S.work || x.b === S.work)));
     main.innerHTML = `<section class="head head--sort"><h1>Sorting table<sup>${left} left</sup></h1><p class="desc">${esc(SORT_MODES[r.mode].hint || 'One entry at a time: a name, a reason, a place.')}. Save with <kbd>⌘</kbd><kbd>↵</kbd>, skip with <kbd>⌥</kbd><kbd>→</kbd>.</p></section>
       <nav class="tabs sort-tabs">${tabs}</nav>
       <article class="sorter" data-sort="${e.id}">
@@ -658,14 +676,14 @@
           </div>
         </div>
         <form class="sorter-form" data-sort-form autocomplete="off">
-          <label class="label" for="s-title">Name${placeholder ? ' · now “' + esc(e.title) + '”' : ''}</label>
-          <input id="s-title" class="sorter-title" value="${placeholder ? '' : esc(e.title)}" placeholder="${placeholder ? 'What is it?' : esc(e.title)}">
+          <label class="label" for="s-title">Name${guess ? ' · a guess, check it' : placeholder ? ' · now “' + esc(e.title) + '”' : ''}${was ? ` · was “${esc(was.length > 60 ? was.slice(0, 58) + '…' : was)}”` : ''}</label>
+          <input id="s-title" class="sorter-title" value="${placeholder && !guess ? '' : esc(e.title)}" placeholder="${placeholder ? 'What is it?' : esc(e.title)}">
           <label class="label" for="s-why">Why it stayed with you</label>
           <textarea id="s-why" rows="5" placeholder="${esc(KINDS[e.kind].placeholder)}">${esc(e.body || '')}</textarea>
           ${open.length || done.length ? `<div class="sorter-conns"><span class="label">Connections · ${open.length ? `${open.length} without a reason` : 'all explained'}</span>
             ${[...open.map(l => ({ l, other: byId(l.a === e.id ? l.b : l.a) })), ...done.map(n => ({ l: n.link, other: n.other }))].map(({ l, other }) => `
               <label class="sorter-conn"><span>${other.kind === 'work' ? 'What did this give' : 'How does this relate to'} <a href="#/e/${other.id}">${esc(other.title)}</a>?</span>
-              <input data-link="${l.id}" value="${esc(l.note || '')}" placeholder="${other.kind === 'work' ? 'The part that fed the work' : 'The part that matters'}"></label>`).join('')}
+              <span class="conn-row"><input data-link="${l.id}" value="${esc(l.note || '')}" placeholder="${other.kind === 'work' ? 'The part that fed the work' : 'The part that matters'}"><button type="button" class="label link-quiet" data-unlink="${l.id}" title="This is not really connected">Not part of it ×</button></span></label>`).join('')}
           </div>` : ''}
           <div class="sorter-cols"><span class="label">Collections</span><div class="chips">
             ${cols.map(c => `<button type="button" class="chip-t" data-col="${c.id}" aria-pressed="${e.collections.includes(c.id)}">${esc(c.name)}</button>`).join('')}
@@ -685,6 +703,7 @@
     const e = byId(S.list[S.i]); if (!e) return;
     const title = $('#s-title').value.trim();
     if (title && title !== e.title) renameEntry(e, title);
+    if (title && e.extra) delete e.extra.needs_name;
     e.body = $('#s-why').value.trim();
     $$('[data-link]', f).forEach(i => { const l = db.links.find(x => x.id === i.dataset.link); if (l) l.note = i.value.trim(); });
     e.collections = $$('[data-col][aria-pressed="true"]', f).map(b => b.dataset.col);
@@ -693,10 +712,13 @@
     S.i++; renderSide(); renderMain(); scrollTo({ top: 0 });
   }
   main.addEventListener('submit', ev => { if (ev.target.closest('[data-sort-form]')) { ev.preventDefault(); sortSave(); } });
+  main.addEventListener('change', ev => { const s = ev.target.closest('[data-sort-work]'); if (s) go(s.value ? `#/sort/reasons/${s.value}` : '#/sort/reasons'); });
   document.addEventListener('click', ev => {
     if (!ui.route || ui.route.page !== 'sort') return;
     const c = ev.target.closest('[data-col]'); if (c && c.closest('.sorter')) { c.setAttribute('aria-pressed', c.getAttribute('aria-pressed') !== 'true'); return; }
     const fm = ev.target.closest('[data-sort-formative]'); if (fm) { fm.setAttribute('aria-pressed', fm.getAttribute('aria-pressed') !== 'true'); return; }
+    const u = ev.target.closest('[data-unlink]');
+    if (u) { db.links = db.links.filter(l => l.id !== u.dataset.unlink); persist(); const row = u.closest('.sorter-conn'); if (row) row.remove(); toast('Connection removed'); renderSide(); return; }
     const a = ev.target.closest('[data-sort-act]'); if (!a) return;
     if (a.dataset.sortAct === 'skip') ui.sort.i++;
     if (a.dataset.sortAct === 'back') ui.sort.i = Math.max(0, ui.sort.i - 1);
