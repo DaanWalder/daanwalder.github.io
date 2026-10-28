@@ -384,7 +384,7 @@
   function refresh() { ui.route = parseRoute(); renderSide(); if (ui.route.page !== 'edit') renderMain(); renderPanel(); }
   function renderMain() {
     hidePreview();
-    if (sim) { cancelAnimationFrame(sim.raf); sim = null; }
+    if (sim) { sim.stop(); sim = null; }
     const r = ui.route;
     if (ui.query && r.page !== 'edit') listPage({ page: 'list', scope: 'search' });
     else ({ list: listPage, collections: collectionsPage, people: peoplePage, entry: entryPage, edit: editPage, sort: sortPage })[r.page](r);
@@ -1048,87 +1048,166 @@
   }
 
   /* ---------- graph ---------- */
+  // A force layout, like the Synthetic Memories archive: everything drifts to the middle,
+  // points push each other apart, threads pull. Positions are remembered between renders.
+  const GRAPH_DEFAULTS = { size: 1, repulsion: 1, distance: 1, text: 1, collections: false, loose: true };
+  const gprefs = () => (prefs.graph = Object.assign({}, GRAPH_DEFAULTS, prefs.graph || {}));
+  const graphPos = new Map();
+  let graphView = null;
   function graphHtml() {
+    const g = gprefs();
+    const slider = (k, label, min, max, step) => `<label class="tune-row"><span class="label">${label}</span><input type="range" data-tune="${k}" min="${min}" max="${max}" step="${step}" value="${g[k]}"><span class="label v" data-tune-v="${k}">${(+g[k]).toFixed(1)}×</span></label>`;
     return `<div class="field-wrap${ui.animate ? ' rise' : ''}">
       <svg role="img" aria-label="Graph of entries and their connections"></svg>
       <div class="field-hud top">
-        <div class="legend label"><span><i style="background:var(--on-night)"></i>Find</span><span><i style="background:var(--on-dark-muted)"></i>Note</span><span><i class="ring"></i>Work</span><span><i style="background:var(--signal-light)"></i>Formative</span><span><i class="ls"></i>Connection</span><span><i class="ln"></i>Mention</span></div>
+        <div class="legend label"><span><i class="k-find"></i>Find</span><span><i class="k-note"></i>Note</span><span><i class="k-work"></i>Work</span><span><i class="k-formative"></i>Formative</span>${g.collections ? '<span><i class="k-col"></i>Collection</span>' : ''}<span><i class="ln"></i>Mention</span></div>
         <span class="label" id="field-count"></span>
       </div>
+      <div class="field-tools">
+        <button type="button" class="field-btn" id="field-fit" title="Fit everything in view">Fit</button>
+        <button type="button" class="field-btn" id="field-tune" aria-expanded="false" aria-controls="field-tune-panel">Tune</button>
+        <div class="tune" id="field-tune-panel" hidden>
+          ${slider('size', 'Node size', .4, 2.5, .1)}${slider('repulsion', 'Repulsion', .2, 3, .1)}${slider('distance', 'Link distance', .3, 3, .1)}${slider('text', 'Text size', .5, 2.5, .1)}
+          <label class="tune-check"><input type="checkbox" data-tune-check="collections"${g.collections ? ' checked' : ''}><span class="label">Show collections</span></label>
+          <label class="tune-check"><input type="checkbox" data-tune-check="loose"${g.loose ? ' checked' : ''}><span class="label">Show unconnected</span></label>
+          <button type="button" class="field-btn" id="field-reset">Reset to defaults</button>
+        </div>
+      </div>
       <div class="field-hud bottom">
-        <div class="readout" id="readout"><span class="label">Hover a point · drag to rearrange · click to open</span></div>
-        <span class="label">Older ← → newer</span>
+        <div class="readout" id="readout"><span class="label">Hover a point · click to open · drag to move · scroll to zoom</span></div>
       </div></div>`;
   }
   let sim = null;
   function constellation(wrap, entries) {
-    const svg = $('svg', wrap);
-    const W = wrap.clientWidth, H = wrap.clientHeight, pad = 70;
+    const d3 = window.d3, svgEl = $('svg', wrap);
+    if (!d3) { $('#readout', wrap).innerHTML = '<span class="label">The graph library did not load (vendor/d3.min.js).</span>'; return; }
+    const g = gprefs();
+    const W = wrap.clientWidth, H = wrap.clientHeight;
     const ids = new Set(entries.map(e => e.id));
     const rel = relations().filter(r => ids.has(r.a) && ids.has(r.b));
-    const order = [...entries].sort((a, b) => -byNewest(a, b)).map(e => e.id);
-    const tx = e => entries.length < 2 ? W / 2 : pad + order.indexOf(e.id) / (entries.length - 1) * (W - pad * 2);
-    const nodes = entries.map(e => {
-      const deg = rel.filter(r => r.a === e.id || r.b === e.id).length;
-      return { e, deg, home: tx(e), x: tx(e), y: H / 2 + (Math.random() - .5) * H * .5, vx: 0, vy: 0, r: e.kind === 'work' ? 9 : 3 + Math.sqrt(deg) * 1.6 };
-    });
-    const at = Object.fromEntries(nodes.map(n => [n.e.id, n]));
-    const edges = rel.map(r => ({ s: at[r.a], t: at[r.b], r }));
-    $('#field-count', wrap).textContent = `${plural(nodes.length, 'point')} · ${plural(edges.length, 'thread')}`;
-    const NS = 'http://www.w3.org/2000/svg';
-    const make = (tag, attrs = {}) => { const el = document.createElementNS(NS, tag); for (const k in attrs) el.setAttribute(k, attrs[k]); return el; };
-    const gE = make('g'), gN = make('g'); svg.append(gE, gN);
-    edges.forEach(ed => { ed.el = make('line', { class: `e${ed.r.mention ? ' is-mention' : ''}` }); gE.append(ed.el); });
-    nodes.forEach(n => {
-      n.el = make('g', { class: `n k-${n.e.kind}${n.e.formative ? ' is-formative' : ''}${n.e.kind === 'work' || n.deg >= 3 || n.e.formative ? ' is-labelled' : ''}`, tabindex: 0, role: 'link', 'aria-label': n.e.title });
-      n.el.append(make('circle', { class: 'halo', r: n.r + 9 }));
-      if (n.e.kind === 'work') { n.el.append(make('circle', { class: 'ring', r: n.r })); n.el.append(make('circle', { class: 'core', r: 3 })); }
-      else n.el.append(make('circle', { class: 'core', r: n.r }));
-      const label = make('text', { y: n.r + 16, 'text-anchor': 'middle' });
-      label.textContent = n.e.title.length > 30 ? n.e.title.slice(0, 29) + '…' : n.e.title;
-      n.el.append(label); gN.append(n.el);
-    });
-    let alpha = 1, drag = null, moved = false;
-    function tick() {
-      for (let i = 0; i < nodes.length; i++) {
-        const a = nodes[i];
-        for (let j = i + 1; j < nodes.length; j++) {
-          const b = nodes[j]; let dx = b.x - a.x, dy = b.y - a.y; const d2 = dx * dx + dy * dy || 1, d = Math.sqrt(d2), f = 5200 / d2 * alpha;
-          dx /= d; dy /= d; a.vx -= dx * f; a.vy -= dy * f; b.vx += dx * f; b.vy += dy * f;
-        }
-        a.vx += (a.home - a.x) * .006 * alpha; a.vy += (H / 2 - a.y) * .0025 * alpha;
-      }
-      edges.forEach(({ s, t }) => { const dx = t.x - s.x, dy = t.y - s.y, d = Math.sqrt(dx * dx + dy * dy) || 1, f = (d - 130) * .012 * alpha; s.vx += dx / d * f; s.vy += dy / d * f; t.vx -= dx / d * f; t.vy -= dy / d * f; });
-      nodes.forEach(n => { if (n === drag) return; n.vx *= .62; n.vy *= .62; n.x = Math.max(pad / 2, Math.min(W - pad / 2, n.x + n.vx)); n.y = Math.max(60, Math.min(H - 90, n.y + n.vy)); });
-      draw();
-      alpha = Math.max(alpha * .986, drag ? .25 : 0);
-      if (alpha > .008 && sim) sim.raf = requestAnimationFrame(tick);
+    const deg = new Map();
+    rel.forEach(r => { deg.set(r.a, (deg.get(r.a) || 0) + 1); deg.set(r.b, (deg.get(r.b) || 0) + 1); });
+    const shown = g.loose ? entries : entries.filter(e => deg.get(e.id) || e.kind === 'work');
+    const nodes = shown.map(e => ({ id: e.id, e, deg: deg.get(e.id) || 0, kind: e.kind }));
+    const links = rel.map(r => ({ source: r.a, target: r.b, r, mention: !!r.mention }));
+    if (g.collections) {
+      const used = new Map();
+      shown.forEach(e => (e.collections || []).forEach(c => { if (colById(c)) used.set(c, (used.get(c) || 0) + 1); }));
+      used.forEach((n, c) => nodes.push({ id: 'col:' + c, col: colById(c), kind: 'col', deg: n }));
+      shown.forEach(e => (e.collections || []).forEach(c => { if (used.has(c)) links.push({ source: e.id, target: 'col:' + c, col: true }); }));
     }
+    const radius = n => (n.kind === 'col' ? Math.min(5 + Math.sqrt(n.deg) * .9, 16) : n.kind === 'work' ? Math.min(7 + Math.sqrt(n.deg) * .9, 16) : Math.min(2.6 + Math.sqrt(n.deg) * 1.5, 10)) * g.size;
+    // Start from remembered positions; new points start near the middle, a little apart
+    nodes.forEach((n, i) => {
+      const p = graphPos.get(n.id);
+      if (p) { n.x = p.x; n.y = p.y; }
+      else { const a = i * 2.39996, s = 10 * Math.sqrt(i + 1); n.x = W / 2 + Math.cos(a) * s; n.y = H / 2 + Math.sin(a) * s; }
+    });
+    const fresh = nodes.some(n => !graphPos.has(n.id));
+    $('#field-count', wrap).textContent = `${plural(shown.length, 'point')} · ${plural(rel.length, 'thread')}`;
+
+    const svg = d3.select(svgEl).attr('viewBox', [0, 0, W, H]);
+    const layer = svg.append('g');
+    const linkSel = layer.append('g').selectAll('line').data(links).join('line')
+      .attr('class', d => 'e' + (d.mention ? ' is-mention' : '') + (d.col ? ' is-col' : ''));
+    const nodeSel = layer.append('g').selectAll('g').data(nodes).join('g')
+      .attr('class', d => `n k-${d.kind}${d.e && d.e.formative ? ' is-formative' : ''}${d.kind === 'work' || d.kind === 'col' ? ' is-key' : ''}`)
+      .attr('tabindex', 0).attr('role', 'link').attr('aria-label', d => d.e ? d.e.title : d.col.name);
+    nodeSel.append('circle').attr('class', 'halo').attr('r', d => radius(d) + 7);
+    nodeSel.append('circle').attr('class', 'core').attr('r', radius);
+    const labelOf = d => { const t = d.e ? d.e.title : d.col.name, max = d.kind === 'work' || d.kind === 'col' ? 34 : 26; return t.length > max ? t.slice(0, max - 1) + '…' : t; };
+    nodeSel.append('text').attr('text-anchor', 'middle').attr('dy', d => radius(d) + 10 * g.text).style('font-size', 7 * g.text + 'px').text(labelOf);
+
+    const strengthOf = d => d.kind === 'col' ? -380 : d.kind === 'work' ? -300 : d.deg ? -110 - Math.min(d.deg, 12) * 12 : -38;
+    sim = d3.forceSimulation(nodes)
+      .force('link', d3.forceLink(links).id(d => d.id)
+        .distance(d => (d.col ? 70 : d.mention ? 80 : 48) * g.distance)
+        .strength(d => d.col ? .08 : Math.min(.7, 1 / Math.min(d.source.deg || 1, d.target.deg || 1))))
+      .force('charge', d3.forceManyBody().strength(d => strengthOf(d) * g.repulsion).distanceMax(900).theta(.9))
+      .force('x', d3.forceX(W / 2).strength(d => d.deg ? .045 : .09))
+      .force('y', d3.forceY(H / 2).strength(d => d.deg ? .045 : .09))
+      .force('collide', d3.forceCollide(d => radius(d) + 2).iterations(1))
+      .alphaDecay(.03).stop();
+    if (fresh) for (let i = 0; i < 140; i++) sim.tick(); else sim.alpha(.08);
+
+    // labels fade in as you zoom; Works and collections always carry theirs
+    let k = 1;
+    // Works and collections keep a readable name at any zoom; the rest appear once you are close
+    const keyText = () => nodeSel.filter('.is-key').select('text').style('font-size', 7 * g.text * Math.max(1, 1.6 / k) + 'px').attr('dy', d => radius(d) + 10 * g.text * Math.max(1, 1.6 / k));
+    let lastK = 0;
+    const labelLevel = () => { svgEl.dataset.zoom = k > 1.7 ? 'near' : k > .9 ? 'mid' : 'far'; if (Math.abs(k - lastK) / k > .08) { lastK = k; keyText(); } };
+    const zoom = d3.zoom().scaleExtent([.08, 8]).on('zoom', ev => { k = ev.transform.k; layer.attr('transform', ev.transform); labelLevel(); if (graphView) graphView.t = ev.transform; });
+    svg.call(zoom).on('dblclick.zoom', null);
+    function fit(animate) {
+      const xs = nodes.map(n => n.x), ys = nodes.map(n => n.y);
+      if (!xs.length) return;
+      const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+      const s = Math.min(4, .9 / Math.max((x1 - x0) / W, (y1 - y0) / (H - 120), .01));
+      const t = d3.zoomIdentity.translate(W / 2, H / 2 + 10).scale(s).translate(-(x0 + x1) / 2, -(y0 + y1) / 2);
+      (animate ? svg.transition().duration(500) : svg).call(zoom.transform, t);
+    }
+    const sameView = graphView && graphView.key === location.hash && !fresh;
+    if (sameView && graphView.t) svg.call(zoom.transform, graphView.t); else fit(false);
+    graphView = { key: location.hash, t: graphView && sameView ? graphView.t : null };
+
     function draw() {
-      edges.forEach(ed => { ed.el.setAttribute('x1', ed.s.x); ed.el.setAttribute('y1', ed.s.y); ed.el.setAttribute('x2', ed.t.x); ed.el.setAttribute('y2', ed.t.y); });
-      nodes.forEach(n => n.el.setAttribute('transform', `translate(${n.x.toFixed(1)} ${n.y.toFixed(1)})`));
+      linkSel.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+      nodeSel.attr('transform', d => `translate(${d.x.toFixed(1)},${d.y.toFixed(1)})`);
     }
+    let ticks = 0;
+    sim.on('tick', () => { draw(); if (fresh && ++ticks === 90 && !graphView.t) fit(true); })
+      .on('end', () => nodes.forEach(n => graphPos.set(n.id, { x: n.x, y: n.y })));
+    draw(); sim.restart();
+
+    // focus: a point and its neighbours light up, the rest steps back
     const readout = $('#readout', wrap), idle = readout.innerHTML;
-    function focus(n) {
-      wrap.classList.toggle('is-focus', !!n);
-      const near = n ? new Set([n, ...edges.filter(ed => ed.s === n || ed.t === n).flatMap(ed => [ed.s, ed.t])]) : new Set();
-      nodes.forEach(m => m.el.classList.toggle('is-hot', near.has(m)));
-      edges.forEach(ed => ed.el.classList.toggle('is-hot', !!n && (ed.s === n || ed.t === n)));
-      const txt = n && excerpt(n.e.body);
-      readout.innerHTML = n ? `<span class="label">${kindLabel(n.e)} · ${fmtDate(n.e.date)} · ${plural(n.deg, 'thread')}</span><span class="t">${titleHtml(n.e)}</span>${txt ? `<span class="b">${esc(txt.length > 140 ? txt.slice(0, 139) + '…' : txt)}</span>` : ''}` : idle;
+    const nbr = new Map(nodes.map(n => [n, new Set([n])]));
+    links.forEach(l => { nbr.get(l.source).add(l.target); nbr.get(l.target).add(l.source); });
+    function focus(d) {
+      wrap.classList.toggle('is-focus', !!d);
+      const near = d ? nbr.get(d) : new Set();
+      nodeSel.classed('is-hot', n => near.has(n));
+      linkSel.classed('is-hot', l => !!d && (l.source === d || l.target === d));
+      if (!d) { readout.innerHTML = idle; return; }
+      if (d.col) { readout.innerHTML = `<span class="label">Collection · ${plural(d.deg, 'entry', 'entries')}</span><span class="t">${esc(d.col.name)}</span>`; return; }
+      const txt = excerpt(d.e.body);
+      readout.innerHTML = `<span class="label">${kindLabel(d.e)} · ${fmtDate(d.e.date)} · ${plural(d.deg, 'thread')}</span><span class="t">${titleHtml(d.e)}</span>${txt ? `<span class="b">${esc(txt.length > 140 ? txt.slice(0, 139) + '…' : txt)}</span>` : ''}`;
     }
-    const point = ev => { const b = svg.getBoundingClientRect(); return [ev.clientX - b.left, ev.clientY - b.top]; };
-    nodes.forEach(n => {
-      n.el.addEventListener('pointerdown', ev => { drag = n; moved = false; svg.setPointerCapture(ev.pointerId); svg.classList.add('is-dragging'); alpha = Math.max(alpha, .25); if (sim) { cancelAnimationFrame(sim.raf); tick(); } });
-      n.el.addEventListener('pointerenter', () => !drag && focus(n));
-      n.el.addEventListener('pointerleave', () => !drag && focus(null));
-      n.el.addEventListener('focus', () => focus(n));
-      n.el.addEventListener('blur', () => focus(null));
-      n.el.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openEntry(n.e.id); } });
+    const open = d => d.col ? (location.hash = `#/c/${d.col.id}`) : openEntry(d.e.id);
+    let dragging = false;
+    nodeSel
+      .on('pointerenter', (ev, d) => !dragging && focus(d))
+      .on('pointerleave', () => !dragging && focus(null))
+      .on('focus', (ev, d) => focus(d)).on('blur', () => focus(null))
+      .on('keydown', (ev, d) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(d); } })
+      .on('click', (ev, d) => { if (!ev.defaultPrevented) open(d); })
+      .call(d3.drag()
+        .on('start', (ev, d) => { dragging = true; svgEl.classList.add('is-dragging'); if (!ev.active) sim.alphaTarget(.2).restart(); d.fx = d.x; d.fy = d.y; })
+        .on('drag', (ev, d) => { d.fx = ev.x; d.fy = ev.y; })
+        .on('end', (ev, d) => { dragging = false; svgEl.classList.remove('is-dragging'); if (!ev.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
+
+    // tools
+    $('#field-fit', wrap).addEventListener('click', () => fit(true));
+    const tuneBtn = $('#field-tune', wrap), panel = $('#field-tune-panel', wrap);
+    if (ui.graphTune) { panel.hidden = false; tuneBtn.setAttribute('aria-expanded', 'true'); }
+    tuneBtn.addEventListener('click', () => { panel.hidden = !panel.hidden; ui.graphTune = !panel.hidden; tuneBtn.setAttribute('aria-expanded', String(!panel.hidden)); });
+    panel.addEventListener('input', ev => {
+      const s = ev.target.dataset.tune; if (!s) return;
+      g[s] = +ev.target.value; $(`[data-tune-v="${s}"]`, panel).textContent = g[s].toFixed(1) + '×'; savePrefs();
+      if (s === 'size' || s === 'text') {
+        nodeSel.select('.core').attr('r', radius); nodeSel.select('.halo').attr('r', d => radius(d) + 7);
+        nodeSel.select('text').attr('dy', d => radius(d) + 10 * g.text).style('font-size', 7 * g.text + 'px'); keyText();
+        sim.force('collide').radius(d => radius(d) + 2);
+      }
+      if (s === 'repulsion') sim.force('charge').strength(d => strengthOf(d) * g.repulsion);
+      if (s === 'distance') sim.force('link').distance(d => (d.col ? 70 : d.mention ? 80 : 48) * g.distance);
+      sim.alpha(.4).restart();
     });
-    svg.addEventListener('pointermove', ev => { if (!drag) return; const [x, y] = point(ev); if (Math.abs(x - drag.x) + Math.abs(y - drag.y) > 2) moved = true; drag.x = x; drag.y = y; drag.home = x; });
-    svg.addEventListener('pointerup', () => { svg.classList.remove('is-dragging'); if (drag && !moved) openEntry(drag.e.id); drag = null; });
-    sim = { raf: requestAnimationFrame(tick) };
+    panel.addEventListener('change', ev => {
+      const c = ev.target.dataset.tuneCheck; if (!c) return;
+      g[c] = ev.target.checked; savePrefs(); renderMain();
+    });
+    $('#field-reset', wrap).addEventListener('click', () => { prefs.graph = { ...GRAPH_DEFAULTS }; savePrefs(); graphPos.clear(); graphView = null; renderMain(); });
   }
 
   /* ---------- hover preview ---------- */
