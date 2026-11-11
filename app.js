@@ -901,14 +901,20 @@
     fontCss = (await Promise.all([f('familjen-grotesk-latin-400-normal.woff2', 'Familjen Grotesk', 400), f('familjen-grotesk-latin-500-normal.woff2', 'Familjen Grotesk', 500), f('ibm-plex-mono-latin-400-normal.woff2', 'IBM Plex Mono', 400)])).join('\n');
     return fontCss;
   }
-  // Videos become a still with a link: players need the internet and do not print
+  // Videos keep their player; a still with a link stands in when printing, or when the player cannot run
+  // (YouTube refuses to play inside a file opened straight from the disk)
   function exportEmbeds(root) {
     root.querySelectorAll('figure.embed').forEach(fig => {
       const url = fig.dataset.srcUrl, name = fig.dataset.provider || host(url), cap = fig.querySelector('.cap');
-      const yt = (embedFor(url) || {}).src || '', id = (yt.match(/youtube-nocookie\.com\/embed\/([\w-]{11})/) || [])[1];
+      const em = embedFor(url) || {}, id = ((em.src || '').match(/youtube-nocookie\.com\/embed\/([\w-]{11})/) || [])[1];
       const still = id ? `<img src="https://i.ytimg.com/vi/${id}/hqdefault.jpg" alt="">` : `<span class="ph">▶</span>`;
-      const out = document.createElement('figure'); out.className = 'video';
-      out.innerHTML = `<a class="still" href="${esc(url)}">${still}<span class="play">▶ ${esc(name)}</span></a><figcaption>${cap ? `<span class="cap">${cap.innerHTML}</span>` : ''}<a class="src" href="${esc(url)}">${esc(url)}</a></figcaption>`;
+      const local = em.kind && em.kind.startsWith('file-') && !/^https?:/.test(em.src || '');
+      const player = local ? '' : em.kind === 'file-video' ? `<video src="${esc(em.src)}" controls preload="metadata"></video>`
+        : em.kind === 'file-audio' ? `<audio src="${esc(em.src)}" controls preload="metadata"></audio>`
+        : `<iframe src="${esc(em.src)}" title="${esc(name)}" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>`;
+      const out = document.createElement('figure');
+      out.className = `video video--${em.kind || 'video'}${local ? ' no-player' : ''}`; out.dataset.provider = name;
+      out.innerHTML = `${player ? `<div class="player">${player}</div>` : ''}<a class="still" href="${esc(url)}" target="_blank" rel="noopener">${still}<span class="play">▶ Watch on ${esc(name)}</span></a><figcaption>${cap ? `<span class="cap">${cap.innerHTML}</span>` : ''}<a class="src" href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a></figcaption>`;
       fig.replaceWith(out);
     });
   }
@@ -943,7 +949,12 @@
       figure{margin:1.8em 0;break-inside:avoid}figure img{margin:0 auto;max-height:78vh}
       figcaption{margin-top:9px;display:grid;gap:3px}figcaption .cap{font-size:14px;line-height:1.45;color:var(--ink)}
       figcaption .src{text-transform:none;letter-spacing:0;word-break:break-all;color:var(--stone)}
-      .video .still{position:relative;display:flex;align-items:center;justify-content:center;aspect-ratio:16/9;background:#0b0b0c;color:#f1f0eb;text-decoration:none;overflow:hidden}
+      .video .player iframe,.video .player video{display:block;width:100%;aspect-ratio:16/9;height:auto;border:0;background:#0b0b0c}
+      .video--audio .player iframe{aspect-ratio:auto;height:152px;background:none}.video--soundcloud .player iframe{aspect-ratio:auto;height:166px;background:none}.video--list .player iframe{aspect-ratio:auto;height:352px;background:none}.video--portrait .player iframe{aspect-ratio:9/16;max-width:340px}
+      .video--file-audio .player audio{width:100%}
+      .video .still{display:none}
+      .video.no-player .still,.video.offline .still{display:flex}.video.offline .player{display:none}
+      .video .still{position:relative;align-items:center;justify-content:center;aspect-ratio:16/9;background:#0b0b0c;color:#f1f0eb;text-decoration:none;overflow:hidden}
       .video .still img{width:100%;height:100%;object-fit:cover;max-height:none;opacity:.85}
       .video .play{position:absolute;left:14px;bottom:12px;font:11px "IBM Plex Mono",monospace;letter-spacing:.06em;text-transform:uppercase;background:#0b0b0c;color:#f1f0eb;padding:5px 8px}
       .video .ph{font-size:40px}
@@ -954,7 +965,7 @@
       .conns{margin-top:48px;border-top:1px solid var(--ink);padding-top:16px}.conns ul{list-style:none;padding:0;margin:10px 0 0}.conns li{padding:9px 0;border-bottom:1px solid var(--line)}.conns .why{display:block;color:var(--stone);font-size:15px}
       .foot{margin-top:56px}
       @page{margin:18mm 16mm}
-      @media print{.video .still,.video .play,code,pre{-webkit-print-color-adjust:exact;print-color-adjust:exact}p:has(+ figure){break-after:avoid}figcaption{break-before:avoid}html,body{background:#fff}body{padding:0;max-width:none;font-size:11.5pt}h1{font-size:30pt}a{color:inherit}figure img{max-height:60vh}.video .still{max-height:9cm}}`;
+      @media print{.video .player{display:none!important}.video .still{display:flex!important}.video .still,.video .play,code,pre{-webkit-print-color-adjust:exact;print-color-adjust:exact}p:has(+ figure){break-after:avoid}figcaption{break-before:avoid}html,body{background:#fff}body{padding:0;max-width:none;font-size:11.5pt}h1{font-size:30pt}a{color:inherit}figure img{max-height:60vh}.video .still{max-height:9cm}}`;
     return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(e.title)}</title><meta name="generator" content="Memory Archive"><style>${css}</style></head>
@@ -964,7 +975,9 @@ ${e.by ? `<p class="by">by ${esc(e.by)}</p>` : ''}${e.url ? `<p class="source la
 ${root.innerHTML}
 ${conns.length ? `<section class="conns"><div class="label">Connections · ${conns.length}</div><ul>${conns.map(c => `<li>${esc(c.other.title)}${c.note ? `<span class="why">${esc(c.note)}</span>` : ''}</li>`).join('')}</ul></section>` : ''}
 <p class="foot">From the Memory Archive · exported ${esc(fmtDate(today()))}</p>
-</article></body></html>`;
+</article>
+<script>if(location.protocol==='file:')document.querySelectorAll('.video[data-provider="YouTube"]').forEach(function(f){f.classList.add('offline')})</script>
+</body></html>`;
   }
   const fileSlug = t => (t || 'entry').normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^\w]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase().slice(0, 80) || 'entry';
   async function exportEntry(e, fmt) {
@@ -1473,7 +1486,7 @@ ${conns.length ? `<section class="conns"><div class="label">Connections · ${con
               <span class="sep"></span>
               <button type="button" data-md="ul" title="List">•</button><button type="button" data-md="ol" title="Numbered list" class="tool-extra">1.</button><button type="button" data-md="task" title="Checklist" class="tool-extra">☐</button>
               <span class="sep"></span>
-              <button type="button" data-md="link" title="Web link (⌘K)">↗</button><button type="button" data-md="wiki" title="Link to an entry">[[ ]]</button><button type="button" data-md="image" title="Insert image">◐</button>
+              <button type="button" data-md="link" title="Web link (⌘K)">↗</button><button type="button" data-md="wiki" title="Link to an entry">[[ ]]</button><button type="button" data-md="image" title="Insert image">◐</button><button type="button" data-md="caption" class="tool-word" title="Caption for the photo or video above the cursor">Caption</button>
               <button type="button" data-md="code" title="Code" class="tool-extra">&lt;/&gt;</button><button type="button" data-md="hr" title="Divider" class="tool-extra">—</button>
               <div class="modes" role="group" aria-label="Editor layout">${['write', 'split', 'preview'].map(m => `<button type="button" data-mode="${m}" aria-pressed="${prefs.mode === m}">${m}</button>`).join('')}</div>
             </div>
@@ -1613,8 +1626,26 @@ ${conns.length ? `<section class="conns"><div class="label">Connections · ${con
         wiki: () => { const [a, bb] = sel(); const t = ta.value.slice(a, bb); insert(`[[${t}`, a, bb); suggest(); },
         hr: () => insert('\n\n---\n\n'),
         image: () => $('#md-image').click(),
+        caption: () => addCaption(),
       })[b.dataset.md]();
     });
+    // A caption is the line right under a photo or video: find the nearest one above the cursor
+    const mediaLine = l => {
+      const t = l.trim();
+      if (/^!\[[^\]]*\]\([^)]+\)$/.test(t)) return true;
+      const m = t.match(/^<?(https?:\/\/\S+?)>?$/) || t.match(/^\[[^\]]*\]\((https?:\/\/[^)\s]+)\)$/);
+      return !!(m && embedFor(m[1]));
+    };
+    function addCaption() {
+      const v = ta.value, lines = v.split('\n');
+      let at = v.slice(0, ta.selectionStart).split('\n').length - 1;
+      while (at >= 0 && !mediaLine(lines[at])) at--;
+      if (at < 0) { ta.focus(); say('Put the cursor on or under a photo or video link first'); return; }
+      const start = lines.slice(0, at + 1).join('\n').length;
+      const next = lines[at + 1];
+      if (next !== undefined && next.trim() && !mediaLine(next)) { ta.focus(); ta.setSelectionRange(start + 1, start + 1 + next.length); return; }
+      insert('\nCaption', start, start, 1, 8);
+    }
     const insertImage = async file => {
       const data = await downscale(file, 1600), id = uid();
       d.assets = d.assets || {}; d.assets[id] = data;
