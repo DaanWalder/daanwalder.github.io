@@ -882,7 +882,7 @@
       <aside class="entry-side${rise(1)}" aria-label="About this entry">
         ${aboutBlocks(e)}
         <div class="entry-actions"><a class="action" href="#/e/${e.id}/edit"><span>Edit</span></a><button class="action action--danger" type="button" data-act="delete"><span>Delete</span></button></div>
-        <div class="entry-export"><span class="label">Export</span><button class="action" type="button" data-act="export-html"><span>HTML</span></button><button class="action" type="button" data-act="export-pdf"><span>PDF</span></button></div>
+        <div class="entry-export"><span class="label">Export</span><button class="action" type="button" data-act="export-html"><span>HTML</span></button><button class="action" type="button" data-act="export-pdf"><span>PDF</span></button><button class="action" type="button" data-act="export-copy"><span>Copy</span></button></div>
       </aside>
     </article>`;
     if (lineage) { const box = $('.gens', main); if (box) { requestAnimationFrame(() => drawThreads(box)); wireThreads(box); } }
@@ -979,6 +979,61 @@ ${conns.length ? `<section class="conns"><div class="label">Connections · ${con
 <script>if(location.protocol==='file:')document.querySelectorAll('.video[data-provider="YouTube"]').forEach(function(f){f.classList.add('offline')})</script>
 </body></html>`;
   }
+  // Copy: the same content, made for pasting into an email. Mail programs drop <style>, so every element carries its own
+  async function emailHtml(e) {
+    const doc = new DOMParser().parseFromString(await exportHtml(e), 'text/html');
+    const art = doc.querySelector('article');
+    art.querySelectorAll('script, .player, .foot').forEach(n => n.remove());
+    const F = 'font-family:Helvetica,Arial,sans-serif;', M = 'font-family:Menlo,Consolas,monospace;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:#6e6c66;';
+    const style = (sel, css) => art.querySelectorAll(sel).forEach(n => n.setAttribute('style', css));
+    style('h1', F + 'font-size:28px;line-height:1.15;font-weight:600;margin:6px 0 8px;color:#0e0e0e');
+    style('h2', F + 'font-size:20px;font-weight:600;margin:24px 0 8px;color:#0e0e0e');
+    style('h3', F + 'font-size:17px;font-weight:600;margin:20px 0 6px;color:#0e0e0e');
+    style('p, li', F + 'font-size:15px;line-height:1.55;color:#0e0e0e;margin:0 0 12px');
+    style('header', 'border-bottom:1px solid #0e0e0e;padding-bottom:14px;margin-bottom:20px');
+    style('.meta, .label', M + 'margin:0 0 6px');
+    style('.by', F + 'font-size:15px;color:#6e6c66;margin:0 0 6px');
+    style('blockquote', 'margin:16px 0;padding-left:14px;border-left:2px solid #0e0e0e');
+    style('figure', 'margin:20px 0');
+    style('img', 'display:block;max-width:100%;height:auto;border:0');
+    style('.video .still', 'display:block;position:relative;text-decoration:none;color:#0e0e0e');
+    style('.video .play', M + 'display:inline-block;margin-top:6px;color:#254fff');
+    style('.video .ph', 'display:none');
+    style('figcaption', 'margin-top:6px');
+    style('figcaption .cap', F + 'display:block;font-size:13px;line-height:1.45;color:#0e0e0e');
+    style('figcaption .src', 'font-family:Menlo,Consolas,monospace;font-size:11px;color:#6e6c66;word-break:break-all');
+    style('.conns', 'border-top:1px solid #0e0e0e;margin-top:24px;padding-top:10px');
+    style('.conns ul', 'list-style:none;padding:0;margin:8px 0 0');
+    style('.conns .why', 'display:block;color:#6e6c66;font-size:14px');
+    style('a:not(.still):not(.src)', 'color:#254fff');
+    style('code', 'font-family:Menlo,Consolas,monospace;font-size:13px;background:#eeede8;padding:1px 4px');
+    // The still of a video already links out; a dark box without a still is replaced by its link alone
+    art.querySelectorAll('.video .still').forEach(a => { if (!a.querySelector('img')) a.querySelector('.ph') && a.querySelector('.ph').remove(); });
+    return `<div style="${F}max-width:640px;color:#0e0e0e">${art.innerHTML}</div>`;
+  }
+  function emailText(e) {
+    const body = String(e.body || '').replace(WIKI, (m, t, a) => (a || t).trim()).replace(/!\[([^\]]*)\]\([^)]*\)/g, (m, alt) => alt ? `[${alt}]` : '')
+      .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '$1 ($2)').replace(/^#{1,6} /gm, '').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/(^|[\s(])[_*]([^_*\n]+)[_*](?=[\s).,;:!?]|$)/gm, '$1$2').replace(/\n{3,}/g, '\n\n').trim();
+    const meta = [kindLabel(e), `${KINDS[e.kind].date} ${fmtDate(e.date)}`].join(' · ');
+    return [e.title, meta, e.by ? `by ${e.by}` : '', e.url ? e.url : '', '', e.caption ? `(${e.caption})` : '', body].filter((x, i) => x || i === 4).join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
+  }
+  async function copyEntry(e) {
+    const html = emailHtml(e), text = emailText(e);
+    try {
+      // The clipboard has to be claimed within the click; the html follows once the images are packed in
+      await navigator.clipboard.write([new ClipboardItem({ 'text/html': html.then(h => new Blob([h], { type: 'text/html' })), 'text/plain': new Blob([text], { type: 'text/plain' }) })]);
+    } catch {
+      // Older browsers: select a rendered copy and use the classic copy command
+      const box = Object.assign(document.createElement('div'), { innerHTML: await html, contentEditable: 'true' });
+      Object.assign(box.style, { position: 'fixed', left: '-9999px', top: '0' });
+      document.body.append(box);
+      const r = document.createRange(); r.selectNodeContents(box); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      const ok = document.execCommand('copy'); sel.removeAllRanges(); box.remove();
+      if (!ok) return toast('Could not copy · try the html export');
+    }
+    toast('Copied · paste it into an email or document');
+  }
+
   const fileSlug = t => (t || 'entry').normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^\w]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase().slice(0, 80) || 'entry';
   async function exportEntry(e, fmt) {
     toast(fmt === 'pdf' ? 'Preparing the pdf…' : 'Preparing the page…');
@@ -1074,6 +1129,7 @@ ${conns.length ? `<section class="conns"><div class="label">Connections · ${con
       case 'delete': return deleteEntries([entry.id]);
       case 'export-html': return exportEntry(entry, 'html');
       case 'export-pdf': return exportEntry(entry, 'pdf');
+      case 'export-copy': return copyEntry(entry);
       default: return;
     }
     entry.updated = now(); persist(); refresh();
