@@ -221,7 +221,7 @@
     });
     let html = window.marked ? marked.parse(src) : `<p>${esc(text).replace(/\n/g, '<br>')}</p>`;
     html = html.replace(/asset:([a-z0-9]+)/g, (m, id) => (entry && entry.assets && entry.assets[id]) || '');
-    return addEmbeds(window.DOMPurify ? DOMPurify.sanitize(html, { ADD_ATTR: ['data-entry-link'] }) : html);
+    return addFigures(window.DOMPurify ? DOMPurify.sanitize(html, { ADD_ATTR: ['data-entry-link'] }) : html);
   }
   /* ---------- embeds: a video or audio link on its own line plays in place ---------- */
   const secs = t => { if (!t) return 0; if (/^\d+$/.test(t)) return +t; const m = String(t).match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/); return m ? (+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0) : 0; };
@@ -268,33 +268,54 @@
     if (/\.(mp3|m4a|aac|ogg|oga|wav|flac)$/i.test(p)) return { kind: 'file-audio', name: host(raw), src: u.href };
     return null;
   }
-  function embedHtml(em, url, label, bare) {
-    const cap = bare ? '' : `<figcaption class="label"><a href="${esc(url)}" target="_blank" rel="noopener">${esc(label || em.name)} ↗</a></figcaption>`;
-    if (em.kind === 'file-video') return `<figure class="embed embed--video"><video src="${esc(em.src)}" controls preload="metadata"></video>${cap}</figure>`;
-    if (em.kind === 'file-audio') return `<figure class="embed embed--file-audio"><audio src="${esc(em.src)}" controls preload="metadata"></audio>${cap}</figure>`;
-    return `<figure class="embed embed--${em.kind}"><iframe src="${esc(em.src)}" title="${esc(label || em.name)}" loading="lazy" allow="autoplay; encrypted-media; fullscreen; picture-in-picture; clipboard-write" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>${cap}</figure>`;
+  // capHtml is a caption already made safe (it comes from rendered, sanitised markdown)
+  function embedHtml(em, url, label, bare, capHtml) {
+    const src = `<a class="label src" href="${esc(url)}" target="_blank" rel="noopener">${esc(capHtml ? em.name : label || em.name)} ↗</a>`;
+    const cap = capHtml ? `<figcaption><span class="cap">${capHtml}</span>${src}</figcaption>` : bare ? '' : `<figcaption>${src}</figcaption>`;
+    const at = `class="embed embed--${em.kind}" data-src-url="${esc(url)}" data-provider="${esc(em.name)}"`;
+    if (em.kind === 'file-video') return `<figure ${at}><video src="${esc(em.src)}" controls preload="metadata"></video>${cap}</figure>`;
+    if (em.kind === 'file-audio') return `<figure ${at}><audio src="${esc(em.src)}" controls preload="metadata"></audio>${cap}</figure>`;
+    return `<figure ${at}><iframe src="${esc(em.src)}" title="${esc(label || em.name)}" loading="lazy" allow="autoplay; encrypted-media; fullscreen; picture-in-picture; clipboard-write" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>${cap}</figure>`;
   }
-  // A paragraph line that is nothing but an embeddable link becomes the player itself
-  function addEmbeds(html) {
-    if (!html.includes('<a ')) return html;
+  // Photos and video links on a line of their own become figures. The line right under one is its caption;
+  // a markdown title (![](src "caption")) or a link label ([caption](video link)) works too.
+  function addFigures(html) {
+    if (!/<(a|img) /.test(html)) return html;
     const t = document.createElement('template'); t.innerHTML = html;
-    const solo = nodes => { const s = nodes.filter(n => !(n.nodeType === 3 && !n.textContent.trim())); return s.length === 1 && s[0].nodeName === 'A' ? s[0] : null; };
+    const solo = nodes => { const s = nodes.filter(n => !(n.nodeType === 3 && !n.textContent.trim())); return s.length === 1 && ['A', 'IMG'].includes(s[0].nodeName) ? s[0] : null; };
+    const empty = l => !l.some(n => n.textContent.trim() || (n.nodeType === 1 && n.nodeName !== 'BR'));
+    const capOf = l => { const d = document.createElement('div'); l.forEach(n => d.append(n.cloneNode(true))); return d.innerHTML.trim(); };
     t.content.querySelectorAll('p').forEach(par => {
       const lines = [[]];
       [...par.childNodes].forEach(n => n.nodeName === 'BR' ? lines.push([]) : lines[lines.length - 1].push(n));
-      const found = lines.map(l => { const a = solo(l), em = a && embedFor(a.getAttribute('href')); return em ? { a, em } : null; });
-      if (!found.some(Boolean)) return;
+      const media = lines.map(l => {
+        const n = solo(l); if (!n) return null;
+        if (n.nodeName === 'IMG') return { img: n };
+        const em = embedFor(n.getAttribute('href')); return em ? { a: n, em } : null;
+      });
+      const anyCap = media.some((m, i) => m && (m.em || (lines[i + 1] && !media[i + 1] && !empty(lines[i + 1])) || (m.img && m.img.getAttribute('title'))));
+      if (!anyCap) return;
       const out = document.createDocumentFragment(); let open = null;
-      lines.forEach((l, i) => {
-        if (found[i]) {
-          const { a, em } = found[i], href = a.getAttribute('href'), text = a.textContent.trim();
-          const tpl = document.createElement('template'); tpl.innerHTML = embedHtml(em, href, text && text !== href ? text : '');
+      for (let i = 0; i < lines.length; i++) {
+        const m = media[i], l = lines[i];
+        if (m) {
+          let cap = '';
+          if (lines[i + 1] && !media[i + 1] && !empty(lines[i + 1])) { cap = capOf(lines[i + 1]); i++; }
+          const tpl = document.createElement('template');
+          if (m.em) {
+            const href = m.a.getAttribute('href'), text = m.a.textContent.trim(), label = text && text !== href ? text : '';
+            tpl.innerHTML = embedHtml(m.em, href, cap ? '' : label, false, cap || (label ? esc(label) : ''));
+          } else {
+            cap = cap || esc(m.img.getAttribute('title') || '');
+            m.img.removeAttribute('title');
+            tpl.innerHTML = `<figure class="figure">${m.img.outerHTML}${cap ? `<figcaption><span class="cap">${cap}</span></figcaption>` : ''}</figure>`;
+          }
           out.append(tpl.content); open = null;
-        } else if (l.some(n => n.textContent.trim() || n.nodeType === 1)) {
+        } else if (!empty(l)) {
           if (open) open.append(document.createElement('br')); else { open = document.createElement('p'); out.append(open); }
           open.append(...l);
         }
-      });
+      }
       par.replaceWith(out);
     });
     return t.innerHTML;
@@ -680,7 +701,7 @@
   function mediaAndText(e, { compact = false } = {}) {
     const docs = e.kind === 'work' ? docsOf(e.id) : [], of = e.documents && byId(e.documents);
     return `${of ? `<p class="doc-of label"><span class="g">◆</span> Documentation of <a href="#/e/${of.id}">${esc(of.title)}</a></p>` : ''}
-      ${srcEmbed(e) ? embedHtml(srcEmbed(e), e.url, '', true) : e.image || e.swatch ? `<div class="hero-media">${plate(e, { big: true })}</div>` : ''}
+      ${heroHtml(e)}
       ${docs.length ? `<section class="docs"><span class="label">Documentation · ${docs.length}</span><div class="docs-grid">${docs.map(d => `<a class="doc" href="${compact ? entryHref(d.id) : '#/e/' + d.id}" title="${esc(d.title)}">${plate(d)}</a>`).join('')}</div></section>` : ''}
       ${e.body ? `<div class="md">${renderMd(e.body, e)}</div>`
         : compact ? `<div class="body-wrap"><label class="visually-hidden" for="q-${e.id}">Note</label><textarea class="quick-note" id="q-${e.id}" data-field="body" placeholder="${esc(KINDS[e.kind].placeholder)}"></textarea></div>`
@@ -689,7 +710,16 @@
       ${e.original ? `<a class="link" href="${esc(e.original)}" target="_blank" rel="noopener"><span>Original image ↗</span></a>` : ''}
       ${e.page ? `<a class="link" href="${esc(e.page)}" target="_blank" rel="noopener"><span>Saved copy of the page ↗</span></a>` : ''}
       ${e.extra && e.extra.arena ? `<a class="link" href="${esc(e.extra.arena)}" target="_blank" rel="noopener"><span>On Are.na ↗</span></a>` : ''}
-      ${e.file ? fileView(e.file) : ''}`;
+      ${e.file && !fileFirst(e) ? fileView(e.file) : ''}`;
+  }
+  // The main photo or video of an entry, with its caption written right underneath it
+  const fileFirst = e => !e.image && !srcEmbed(e) && e.file && e.file.data && !isData(e.file.data) && /^(video|audio)\/|pdf/.test(e.file.type || '') ;
+  function heroHtml(e) {
+    const em = srcEmbed(e);
+    const media = em ? embedHtml(em, e.url, '', true) : fileFirst(e) ? fileView(e.file) : e.image || e.swatch ? `<div class="hero-media">${plate(e, { big: true })}</div>` : '';
+    if (!media) return '';
+    if (!(em || e.image || fileFirst(e))) return media;
+    return `<div class="hero-fig">${media}<label class="visually-hidden" for="cap-${e.id}">Caption</label><input class="caption-field" id="cap-${e.id}" data-field="caption" value="${esc(e.caption || '')}" placeholder="Add a caption…" autocomplete="off"></div>`;
   }
   // Video, audio and pdf play inside the entry; everything else can be downloaded
   function fileView(f) {
@@ -852,9 +882,112 @@
       <aside class="entry-side${rise(1)}" aria-label="About this entry">
         ${aboutBlocks(e)}
         <div class="entry-actions"><a class="action" href="#/e/${e.id}/edit"><span>Edit</span></a><button class="action action--danger" type="button" data-act="delete"><span>Delete</span></button></div>
+        <div class="entry-export"><span class="label">Export</span><button class="action" type="button" data-act="export-html"><span>HTML</span></button><button class="action" type="button" data-act="export-pdf"><span>PDF</span></button></div>
       </aside>
     </article>`;
     if (lineage) { const box = $('.gens', main); if (box) { requestAnimationFrame(() => drawThreads(box)); wireThreads(box); } }
+  }
+
+  /* ---------- export: one entry as a standalone page, or as a pdf through the print dialog ---------- */
+  const toDataUrl = blob => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob); });
+  async function inline(src) {
+    if (!src || /^(data:|https?:)/.test(src)) return src;
+    try { const r = await fetch(src); return r.ok ? await toDataUrl(await r.blob()) : src; } catch { return src; }
+  }
+  let fontCss = null;
+  async function exportFonts() {
+    if (fontCss !== null) return fontCss;
+    const f = async (file, fam, w) => { try { return `@font-face{font-family:"${fam}";src:url(${await inline('fonts/' + file)}) format("woff2");font-weight:${w}}`; } catch { return ''; } };
+    fontCss = (await Promise.all([f('familjen-grotesk-latin-400-normal.woff2', 'Familjen Grotesk', 400), f('familjen-grotesk-latin-500-normal.woff2', 'Familjen Grotesk', 500), f('ibm-plex-mono-latin-400-normal.woff2', 'IBM Plex Mono', 400)])).join('\n');
+    return fontCss;
+  }
+  // Videos become a still with a link: players need the internet and do not print
+  function exportEmbeds(root) {
+    root.querySelectorAll('figure.embed').forEach(fig => {
+      const url = fig.dataset.srcUrl, name = fig.dataset.provider || host(url), cap = fig.querySelector('.cap');
+      const yt = (embedFor(url) || {}).src || '', id = (yt.match(/youtube-nocookie\.com\/embed\/([\w-]{11})/) || [])[1];
+      const still = id ? `<img src="https://i.ytimg.com/vi/${id}/hqdefault.jpg" alt="">` : `<span class="ph">▶</span>`;
+      const out = document.createElement('figure'); out.className = 'video';
+      out.innerHTML = `<a class="still" href="${esc(url)}">${still}<span class="play">▶ ${esc(name)}</span></a><figcaption>${cap ? `<span class="cap">${cap.innerHTML}</span>` : ''}<a class="src" href="${esc(url)}">${esc(url)}</a></figcaption>`;
+      fig.replaceWith(out);
+    });
+  }
+  async function exportHtml(e) {
+    const root = document.createElement('div');
+    const em = srcEmbed(e);
+    const capHtml = e.caption ? `<span class="cap">${esc(e.caption)}</span>` : '';
+    let hero = '';
+    if (em) hero = embedHtml(em, e.url, '', !capHtml, capHtml);
+    else if (e.image) hero = `<figure class="figure hero"><img src="${esc(e.image)}" alt="">${capHtml ? `<figcaption>${capHtml}</figcaption>` : ''}</figure>`;
+    root.innerHTML = hero + (e.body ? renderMd(e.body, e) : '');
+    // [[links]] point into the archive, which the exported page does not have: keep the words
+    root.querySelectorAll('a.wikilink').forEach(a => { const s = document.createElement('span'); s.className = 'wikilink'; s.textContent = a.textContent; a.replaceWith(s); });
+    exportEmbeds(root);
+    // Files in the archive come along inside the page
+    await Promise.all([...root.querySelectorAll('img')].map(async img => { img.setAttribute('src', await inline(img.getAttribute('src'))); }));
+    const conns = neighbours(e.id).filter(n => n.other);
+    const cols = e.collections.map(colById).filter(Boolean).map(c => esc(c.name));
+    const meta = [kindLabel(e), `${KINDS[e.kind].date} ${fmtDate(e.date)}`].map(esc).join(' · ');
+    const css = `${await exportFonts()}
+      :root{--ink:#0e0e0e;--paper:#f6f5f0;--stone:#6e6c66;--line:#d8d6cf;--signal:#254fff}
+      *{box-sizing:border-box}html{background:var(--paper)}
+      body{margin:0 auto;max-width:760px;padding:64px 28px 96px;font:17px/1.6 "Familjen Grotesk",system-ui,sans-serif;color:var(--ink);background:var(--paper);-webkit-font-smoothing:antialiased}
+      .label,.meta,figcaption .src,.foot{font:11px/1.5 "IBM Plex Mono",ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase;color:var(--stone)}
+      h1{font-weight:500;font-size:44px;line-height:1.05;letter-spacing:-.02em;margin:14px 0 10px}
+      .by{margin:0 0 4px;color:var(--stone)}
+      .source a{color:var(--ink)}
+      header{border-bottom:1px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+      h2,h3{font-weight:500;letter-spacing:-.01em;line-height:1.2;margin:1.8em 0 .5em}
+      p{margin:0 0 1em}a{color:var(--signal)}blockquote{margin:1.4em 0;padding-left:18px;border-left:2px solid var(--ink)}
+      img{max-width:100%;height:auto;display:block}
+      figure{margin:1.8em 0;break-inside:avoid}figure img{margin:0 auto;max-height:78vh}
+      figcaption{margin-top:9px;display:grid;gap:3px}figcaption .cap{font-size:14px;line-height:1.45;color:var(--ink)}
+      figcaption .src{text-transform:none;letter-spacing:0;word-break:break-all;color:var(--stone)}
+      .video .still{position:relative;display:flex;align-items:center;justify-content:center;aspect-ratio:16/9;background:#0b0b0c;color:#f1f0eb;text-decoration:none;overflow:hidden}
+      .video .still img{width:100%;height:100%;object-fit:cover;max-height:none;opacity:.85}
+      .video .play{position:absolute;left:14px;bottom:12px;font:11px "IBM Plex Mono",monospace;letter-spacing:.06em;text-transform:uppercase;background:#0b0b0c;color:#f1f0eb;padding:5px 8px}
+      .video .ph{font-size:40px}
+      .wikilink{border-bottom:1px solid var(--line)}
+      code{font:14px "IBM Plex Mono",monospace;background:#e9e7e0;padding:1px 4px}pre{background:#e9e7e0;padding:14px;overflow:auto}
+      hr{border:0;border-top:1px solid var(--line);margin:2em 0}
+      table{border-collapse:collapse}td,th{border:1px solid var(--line);padding:6px 10px}
+      .conns{margin-top:48px;border-top:1px solid var(--ink);padding-top:16px}.conns ul{list-style:none;padding:0;margin:10px 0 0}.conns li{padding:9px 0;border-bottom:1px solid var(--line)}.conns .why{display:block;color:var(--stone);font-size:15px}
+      .foot{margin-top:56px}
+      @page{margin:18mm 16mm}
+      @media print{.video .still,.video .play,code,pre{-webkit-print-color-adjust:exact;print-color-adjust:exact}p:has(+ figure){break-after:avoid}figcaption{break-before:avoid}html,body{background:#fff}body{padding:0;max-width:none;font-size:11.5pt}h1{font-size:30pt}a{color:inherit}figure img{max-height:60vh}.video .still{max-height:9cm}}`;
+    return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(e.title)}</title><meta name="generator" content="Memory Archive"><style>${css}</style></head>
+<body><article>
+<header><div class="meta">${meta}${e.formative ? ' · Formative' : ''}</div><h1>${esc(e.title)}</h1>
+${e.by ? `<p class="by">by ${esc(e.by)}</p>` : ''}${e.url ? `<p class="source label">Source · <a href="${esc(e.url)}">${esc(host(e.url) || e.url)}</a></p>` : ''}${cols.length ? `<p class="label">${cols.join(' · ')}</p>` : ''}</header>
+${root.innerHTML}
+${conns.length ? `<section class="conns"><div class="label">Connections · ${conns.length}</div><ul>${conns.map(c => `<li>${esc(c.other.title)}${c.note ? `<span class="why">${esc(c.note)}</span>` : ''}</li>`).join('')}</ul></section>` : ''}
+<p class="foot">From the Memory Archive · exported ${esc(fmtDate(today()))}</p>
+</article></body></html>`;
+  }
+  const fileSlug = t => (t || 'entry').normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^\w]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase().slice(0, 80) || 'entry';
+  async function exportEntry(e, fmt) {
+    toast(fmt === 'pdf' ? 'Preparing the pdf…' : 'Preparing the page…');
+    const html = await exportHtml(e);
+    if (fmt === 'html') {
+      const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([html], { type: 'text/html' })), download: fileSlug(e.title) + '.html' });
+      document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      return toast('Exported as html');
+    }
+    // PDF: the page is printed from a hidden frame; choose "Save as PDF" in the print dialog
+    const fr = Object.assign(document.createElement('iframe'), { title: 'Export', srcdoc: html });
+    fr.setAttribute('aria-hidden', 'true');
+    Object.assign(fr.style, { position: 'fixed', right: '0', bottom: '0', width: '1px', height: '1px', border: '0', opacity: '0' });
+    document.body.append(fr);
+    await new Promise(r => fr.addEventListener('load', r, { once: true }));
+    const w = fr.contentWindow, doc = fr.contentDocument;
+    await Promise.race([Promise.all([doc.fonts ? doc.fonts.ready : 0, ...[...doc.images].map(i => i.complete ? 0 : new Promise(r => { i.onload = i.onerror = r; }))]), new Promise(r => setTimeout(r, 6000))]);
+    const prevTitle = document.title; document.title = e.title; // the browser names the pdf after this
+    w.addEventListener('afterprint', () => setTimeout(() => fr.remove(), 500), { once: true });
+    w.focus(); w.print();
+    document.title = prevTitle;
+    setTimeout(() => fr.isConnected && fr.remove(), 120000);
   }
 
   /* ---------- entry: side view ---------- */
@@ -926,6 +1059,8 @@
       case 'uncollect': entry.collections = entry.collections.filter(id => id !== b.dataset.id); break;
       case 'unlink': return withUndo('Connection removed', () => { db.links = db.links.filter(l => l.id !== b.dataset.id); });
       case 'delete': return deleteEntries([entry.id]);
+      case 'export-html': return exportEntry(entry, 'html');
+      case 'export-pdf': return exportEntry(entry, 'pdf');
       default: return;
     }
     entry.updated = now(); persist(); refresh();
@@ -1354,7 +1489,8 @@
           <div class="fieldset" data-for="find work"><label class="label" for="e-url">Source link</label><input id="e-url" name="url" type="url" value="${esc(d.url)}" placeholder="https://"></div>
           <div class="fieldset"><label class="label" for="e-date" id="date-label">${KINDS[d.kind].date}</label><input id="e-date" name="date" type="date" value="${esc(d.date)}"></div>
           <div class="fieldset"><span class="label">Image or file</span>
-            <label class="dropbox" id="dropbox"><input type="file" id="e-media" hidden><span id="dropbox-inner" style="display:contents"></span></label></div>
+            <label class="dropbox" id="dropbox"><input type="file" id="e-media" hidden><span id="dropbox-inner" style="display:contents"></span></label>
+            <label class="visually-hidden" for="e-caption">Caption</label><input id="e-caption" name="caption" value="${esc(d.caption || '')}" placeholder="Caption for the image or video"></div>
           <div class="fieldset"><span class="label">Collections</span>
             <div class="pills" id="e-cols"></div>
             <div class="inline-add"><input id="e-col" list="col-names-e" placeholder="Add to a collection…" aria-label="Add to collection"><datalist id="col-names-e">${db.collections.map(c => `<option value="${esc(c.name)}">`).join('')}</datalist></div></div>
@@ -1365,7 +1501,7 @@
         <button class="action action--primary" type="submit"><span class="dot"></span><span>Done</span></button>
         <button class="action" type="button" id="e-cancel"><span>${existing ? 'Revert changes' : 'Discard'}</span></button>
         <button class="action action--danger" type="button" id="e-delete"${ui.autoTarget ? '' : ' hidden'}><span>Delete</span></button>
-        <span class="label hint">Saves as you type · ⌘S or Esc done · [[ link an entry</span>
+        <span class="label hint">Saves as you type · ⌘S or Esc done · [[ link an entry · the line under a photo or video is its caption</span>
       </div>
     </form>`;
     wireEditor(existing);
@@ -1425,6 +1561,7 @@
       if (e.target.name === 'by') d.by = e.target.value;
       if (e.target.name === 'url') d.url = e.target.value;
       if (e.target.name === 'date') d.date = e.target.value;
+      if (e.target.name === 'caption') d.caption = e.target.value;
       if (e.target === ta) { d.body = ta.value; grow(); updatePreview(); suggest(); }
       if (e.target.id !== 'e-col') dirty();
     });

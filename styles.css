@@ -771,3 +771,20 @@ html, body { overflow-x: clip; }
 .embed figcaption a:hover { color: var(--signal); }
 .sorter-left .embed { margin: 0 0 12px; }
 .save-status { transition: color .2s; }
+
+/* captions */
+.hero-fig { margin-bottom: 28px; }
+.hero-fig .hero-media, .hero-fig .embed, .hero-fig .media-embed { margin-bottom: 0; }
+.caption-field { display: block; width: 100%; margin-top: 10px; border: 0; border-bottom: 1px solid transparent; background: transparent; padding: 2px 0 5px; font-size: var(--fs-small, 14px); line-height: 1.45; color: var(--ink); border-radius: 0; transition: border-color .2s; }
+.caption-field::placeholder { color: var(--stone); }
+.caption-field:hover { border-bottom-color: var(--hairline); }
+.caption-field:focus { outline: none; border-bottom-color: var(--signal); }
+.md figure.figure { margin: 1.4em 0; }
+.md figure.figure img { margin: 0; }
+.embed figcaption, .md figure.figure figcaption { display: grid; gap: 3px; margin-top: 2px; }
+.embed figcaption .cap, .figure figcaption .cap { font-size: var(--fs-small, 14px); line-height: 1.45; color: var(--ink); }
+.embed figcaption .src { color: var(--stone); }
+.embed figcaption .src:hover { color: var(--signal); }
+#e-caption { margin-top: 8px; }
+.entry-export { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+.entry-export .label { margin-right: 4px; }
