@@ -757,3 +757,17 @@ html, body { overflow-x: clip; }
   --stone: #8f8d86; --hairline: #3a3936; --signal: #6683ff; --signal-glow: rgb(102 131 255 / .45); --signal-wash: rgb(102 131 255 / .12); --danger: #ff6a52;
 }
 .theme-btn { display: inline-flex; gap: 6px; align-items: center; }
+
+/* embeds: video and audio links that play in place */
+.embed { margin: 1.6em 0; display: grid; gap: 8px; }
+.hero-media + .embed, .embed:first-child { margin-top: 0; }
+.embed iframe, .embed video { display: block; width: 100%; aspect-ratio: 16 / 9; height: auto; border: 0; background: var(--night); }
+.embed--portrait iframe { aspect-ratio: 9 / 16; max-width: 340px; }
+.embed--audio iframe { aspect-ratio: auto; height: 152px; background: transparent; }
+.embed--soundcloud iframe { aspect-ratio: auto; height: 166px; background: transparent; }
+.embed--list iframe { aspect-ratio: auto; height: 352px; background: transparent; }
+.embed--file-audio audio { width: 100%; }
+.embed figcaption a { color: inherit; }
+.embed figcaption a:hover { color: var(--signal); }
+.sorter-left .embed { margin: 0 0 12px; }
+.save-status { transition: color .2s; }

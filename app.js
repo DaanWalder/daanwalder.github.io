@@ -109,16 +109,16 @@
   function persist() {
     if (!SERVER) {
       const snapshot = JSON.parse(JSON.stringify(db));
-      saving = saving.then(() => store.set('db', snapshot)).catch(() => toast('Could not save · export a backup'));
+      saving = saving.then(() => store.set('db', snapshot)).catch(() => { toast('Could not save · export a backup'); return false; });
       return saving;
     }
     // On disk: embedded images and files become files in media/ first, then the entries are written
     saving = saving.then(async () => { await externalize(); await store.set('db', JSON.parse(JSON.stringify(db))); })
       .catch(async err => {
-        if (!err.conflict) return toast('Could not save · is the archive server still running?');
+        if (!err.conflict) { toast('Could not save · is the archive server still running?'); return false; }
         // Someone else saved first: take their version, so nothing newer is overwritten
         db = migrate(await store.get('db')); db.entries.forEach(e => { e.collections ||= []; e.assets ||= {}; });
-        refresh(); toast('The archive changed elsewhere · reloaded, your last change was not saved');
+        refresh(); toast('The archive changed elsewhere · reloaded, your last change was not saved'); return false;
       });
     return saving;
   }
@@ -199,12 +199,12 @@
     return c;
   }
   // Rename an entry and keep [[links]] that point to it working
-  function renameEntry(e, title) {
+  function renameEntry(e, title, from = e.title) {
     title = title.trim();
-    if (!title || title === e.title) return 0;
+    if (!title || title === from) { if (title) e.title = title; return 0; }
     let n = 0;
-    if (norm(e.title) !== norm(title)) {
-      const re = new RegExp(`\\[\\[${e.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\|[^\\]]+)?\\]\\]`, 'gi');
+    if (norm(from) !== norm(title)) {
+      const re = new RegExp(`\\[\\[${from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\|[^\\]]+)?\\]\\]`, 'gi');
       db.entries.forEach(x => { if (x.id !== e.id) x.body = (x.body || '').replace(re, (m, alias) => { n++; return `[[${title}${alias || ''}]]`; }); });
     }
     e.title = title; e.updated = now();
@@ -221,7 +221,83 @@
     });
     let html = window.marked ? marked.parse(src) : `<p>${esc(text).replace(/\n/g, '<br>')}</p>`;
     html = html.replace(/asset:([a-z0-9]+)/g, (m, id) => (entry && entry.assets && entry.assets[id]) || '');
-    return window.DOMPurify ? DOMPurify.sanitize(html, { ADD_ATTR: ['data-entry-link'] }) : html;
+    return addEmbeds(window.DOMPurify ? DOMPurify.sanitize(html, { ADD_ATTR: ['data-entry-link'] }) : html);
+  }
+  /* ---------- embeds: a video or audio link on its own line plays in place ---------- */
+  const secs = t => { if (!t) return 0; if (/^\d+$/.test(t)) return +t; const m = String(t).match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/); return m ? (+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0) : 0; };
+  function embedFor(raw) {
+    let u; try { u = new URL(raw); } catch { return null; }
+    if (!/^https?:$/.test(u.protocol)) return null;
+    const h = u.hostname.replace(/^(www\.|m\.)/, ''), p = u.pathname, q = k => u.searchParams.get(k);
+    const ok = v => v && /^[\w-]+$/.test(v);
+    if (/(^|\.)youtube(-nocookie)?\.com$/.test(h) || h === 'youtu.be') {
+      const id = (h === 'youtu.be' ? p.slice(1, 12) : q('v') || (p.match(/^\/(?:embed|shorts|live|v)\/([\w-]{11})/) || [])[1] || '').slice(0, 11);
+      if (/^[\w-]{11}$/.test(id)) {
+        const start = secs(q('t') || q('start'));
+        return { kind: p.startsWith('/shorts/') ? 'portrait' : 'video', name: 'YouTube', src: `https://www.youtube-nocookie.com/embed/${id}?rel=0${start ? `&start=${start}` : ''}` };
+      }
+      if (p === '/playlist' && ok(q('list'))) return { kind: 'video', name: 'YouTube', src: `https://www.youtube-nocookie.com/embed/videoseries?list=${q('list')}` };
+      return null;
+    }
+    if (h === 'vimeo.com' || h === 'player.vimeo.com') {
+      const m = p.match(/^\/(?:video\/|channels\/[\w-]+\/|groups\/[\w-]+\/videos\/)?(\d+)(?:\/([\da-f]+))?\/?$/); if (!m) return null;
+      const hash = m[2] || q('h');
+      return { kind: 'video', name: 'Vimeo', src: `https://player.vimeo.com/video/${m[1]}?dnt=1${hash && /^[\da-f]+$/.test(hash) ? `&h=${hash}` : ''}` };
+    }
+    if (h === 'dailymotion.com' || h === 'dai.ly') {
+      const id = h === 'dai.ly' ? p.slice(1) : (p.match(/^\/video\/([\w]+)/) || [])[1];
+      return ok(id) ? { kind: 'video', name: 'Dailymotion', src: `https://www.dailymotion.com/embed/video/${id}` } : null;
+    }
+    if (h === 'loom.com') { const id = (p.match(/^\/(?:share|embed)\/([\da-f]+)/) || [])[1]; return id ? { kind: 'video', name: 'Loom', src: `https://www.loom.com/embed/${id}` } : null; }
+    if (h === 'ted.com') { const id = (p.match(/^\/talks\/([\w-]+)/) || [])[1]; return id ? { kind: 'video', name: 'TED', src: `https://embed.ted.com/talks/${id}` } : null; }
+    if (h === 'archive.org') { const id = (p.match(/^\/(?:details|embed)\/([\w.-]+)/) || [])[1]; return id ? { kind: 'video', name: 'Internet Archive', src: `https://archive.org/embed/${id}` } : null; }
+    if (h === 'twitch.tv' || h === 'clips.twitch.tv') {
+      const parent = location.hostname || 'localhost';
+      const vid = (p.match(/^\/videos\/(\d+)/) || [])[1], clip = h === 'clips.twitch.tv' ? p.slice(1) : (p.match(/^\/[\w]+\/clip\/([\w-]+)/) || [])[1], chan = (p.match(/^\/([\w]+)\/?$/) || [])[1];
+      if (vid) return { kind: 'video', name: 'Twitch', src: `https://player.twitch.tv/?video=${vid}&parent=${parent}&autoplay=false` };
+      if (ok(clip)) return { kind: 'video', name: 'Twitch', src: `https://clips.twitch.tv/embed?clip=${clip}&parent=${parent}&autoplay=false` };
+      if (chan) return { kind: 'video', name: 'Twitch', src: `https://player.twitch.tv/?channel=${chan}&parent=${parent}&autoplay=false` };
+      return null;
+    }
+    if (h === 'soundcloud.com' && p.split('/').filter(Boolean).length >= 2) return { kind: 'soundcloud', name: 'SoundCloud', src: `https://w.soundcloud.com/player/?url=${encodeURIComponent(u.origin + p)}&color=%23254fff&visual=false&show_comments=false` };
+    if (h === 'open.spotify.com') {
+      const m = p.match(/^\/(?:intl-[\w-]+\/)?(track|album|playlist|episode|show|artist)\/(\w+)/);
+      return m ? { kind: /track|episode/.test(m[1]) ? 'audio' : 'list', name: 'Spotify', src: `https://open.spotify.com/embed/${m[1]}/${m[2]}` } : null;
+    }
+    if (/\.(mp4|m4v|webm|mov)$/i.test(p)) return { kind: 'file-video', name: host(raw), src: u.href };
+    if (/\.(mp3|m4a|aac|ogg|oga|wav|flac)$/i.test(p)) return { kind: 'file-audio', name: host(raw), src: u.href };
+    return null;
+  }
+  function embedHtml(em, url, label, bare) {
+    const cap = bare ? '' : `<figcaption class="label"><a href="${esc(url)}" target="_blank" rel="noopener">${esc(label || em.name)} ↗</a></figcaption>`;
+    if (em.kind === 'file-video') return `<figure class="embed embed--video"><video src="${esc(em.src)}" controls preload="metadata"></video>${cap}</figure>`;
+    if (em.kind === 'file-audio') return `<figure class="embed embed--file-audio"><audio src="${esc(em.src)}" controls preload="metadata"></audio>${cap}</figure>`;
+    return `<figure class="embed embed--${em.kind}"><iframe src="${esc(em.src)}" title="${esc(label || em.name)}" loading="lazy" allow="autoplay; encrypted-media; fullscreen; picture-in-picture; clipboard-write" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>${cap}</figure>`;
+  }
+  // A paragraph line that is nothing but an embeddable link becomes the player itself
+  function addEmbeds(html) {
+    if (!html.includes('<a ')) return html;
+    const t = document.createElement('template'); t.innerHTML = html;
+    const solo = nodes => { const s = nodes.filter(n => !(n.nodeType === 3 && !n.textContent.trim())); return s.length === 1 && s[0].nodeName === 'A' ? s[0] : null; };
+    t.content.querySelectorAll('p').forEach(par => {
+      const lines = [[]];
+      [...par.childNodes].forEach(n => n.nodeName === 'BR' ? lines.push([]) : lines[lines.length - 1].push(n));
+      const found = lines.map(l => { const a = solo(l), em = a && embedFor(a.getAttribute('href')); return em ? { a, em } : null; });
+      if (!found.some(Boolean)) return;
+      const out = document.createDocumentFragment(); let open = null;
+      lines.forEach((l, i) => {
+        if (found[i]) {
+          const { a, em } = found[i], href = a.getAttribute('href'), text = a.textContent.trim();
+          const tpl = document.createElement('template'); tpl.innerHTML = embedHtml(em, href, text && text !== href ? text : '');
+          out.append(tpl.content); open = null;
+        } else if (l.some(n => n.textContent.trim() || n.nodeType === 1)) {
+          if (open) open.append(document.createElement('br')); else { open = document.createElement('p'); out.append(open); }
+          open.append(...l);
+        }
+      });
+      par.replaceWith(out);
+    });
+    return t.innerHTML;
   }
   const plain = text => String(text || '').replace(WIKI, (m, t, a) => a || t).replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/^\s*[-*+] \[[ x]\]/gm, '').replace(/[*_`~]+/g, '').replace(/[#>]+/g, ' ').replace(/(^|\s)-(\s)/g, '$1$2').replace(/\s+/g, ' ').trim();
   const excerpt = text => {
@@ -599,10 +675,12 @@
         ${e.kind !== 'note' ? `<div class="meta-block wide"><label class="label" for="f-url-${e.id}">Source link</label><input class="inline-field" id="f-url-${e.id}" type="url" data-field="url" value="${esc(e.url)}" placeholder="https://"></div>` : ''}`
       : `<div class="meta-block"><span class="label">Details</span><p class="v">${kindLabel(e)}<br>${k.date} ${fmtDate(e.date)}${e.by ? `<br>by ${esc(e.by)}` : ''}<br><span class="muted">Added ${fmtDate((e.created || '').slice(0, 10))}</span></p></div>`}`;
   }
+  // A find whose source is a video plays it, unless the text already embeds that same link
+  const srcEmbed = e => { if (!e.url) return null; const em = embedFor(e.url); return em && !(e.body || '').includes(e.url) ? em : null; };
   function mediaAndText(e, { compact = false } = {}) {
     const docs = e.kind === 'work' ? docsOf(e.id) : [], of = e.documents && byId(e.documents);
     return `${of ? `<p class="doc-of label"><span class="g">◆</span> Documentation of <a href="#/e/${of.id}">${esc(of.title)}</a></p>` : ''}
-      ${e.image || e.swatch ? `<div class="hero-media">${plate(e, { big: true })}</div>` : ''}
+      ${srcEmbed(e) ? embedHtml(srcEmbed(e), e.url, '', true) : e.image || e.swatch ? `<div class="hero-media">${plate(e, { big: true })}</div>` : ''}
       ${docs.length ? `<section class="docs"><span class="label">Documentation · ${docs.length}</span><div class="docs-grid">${docs.map(d => `<a class="doc" href="${compact ? entryHref(d.id) : '#/e/' + d.id}" title="${esc(d.title)}">${plate(d)}</a>`).join('')}</div></section>` : ''}
       ${e.body ? `<div class="md">${renderMd(e.body, e)}</div>`
         : compact ? `<div class="body-wrap"><label class="visually-hidden" for="q-${e.id}">Note</label><textarea class="quick-note" id="q-${e.id}" data-field="body" placeholder="${esc(KINDS[e.kind].placeholder)}"></textarea></div>`
@@ -671,7 +749,7 @@
       return;
     }
     const open = openLinks(e), done = neighbours(e.id).filter(n => n.link && (n.note || '').trim());
-    const media = e.image ? `<div class="sorter-img"><img src="${esc(e.image)}" alt=""></div>` : `<div class="sorter-plate">${plate(e, { big: true })}</div>`;
+    const media = srcEmbed(e) ? embedHtml(srcEmbed(e), e.url, '', true) : e.image ? `<div class="sorter-img"><img src="${esc(e.image)}" alt=""></div>` : `<div class="sorter-plate">${plate(e, { big: true })}</div>`;
     const cols = [...db.collections].sort((a, b) => a.name.localeCompare(b.name));
     const placeholder = needsName(e), guess = !!(e.extra && e.extra.needs_name);
     let was = ''; try { was = e.extra && e.extra.original_title ? JSON.parse(e.extra.original_title) : ''; } catch { was = e.extra.original_title; }
@@ -894,7 +972,7 @@
       body: `${n ? `This also removes ${plural(n, 'connection')}. ` : ''}You can undo this right after.`, ok: 'Delete', danger: true });
     if (!ok) return;
     // Leave a full page or editor of a deleted entry before it disappears
-    if (['entry', 'edit'].includes(ui.route.page) && ids.includes(ui.route.id)) { ui.dirty = false; ui.skipGuard = true; location.hash = ui.lastScope.hash; }
+    if (['entry', 'edit'].includes(ui.route.page) && ids.includes(ui.route.id)) { ui.dirty = false; ui.autoTarget = null; ui.draftOrig = null; ui.flushAutosave = null; ui.skipGuard = true; location.hash = ui.lastScope.hash; }
     withUndo(one ? 'Entry deleted' : `${list.length} entries deleted`, () => {
       db.entries = db.entries.filter(x => !ids.includes(x.id));
       db.links = db.links.filter(l => !ids.includes(l.a) && !ids.includes(l.b));
@@ -1234,11 +1312,14 @@
         image: preset.image || null, file: preset.file || null, collections: ctx && colById(ctx) ? [ctx] : [],
       });
       ui.draft._route = location.hash; ui.draftUrl = existing ? existing.url : '';
+      // What the entry was when editing began: for Revert, and to update [[links]] once the title settles
+      ui.draftOrig = existing ? JSON.parse(JSON.stringify(existing)) : null;
+      ui.autoTarget = existing || null;
       ui.dirty = !!(preset.url || preset.image || preset.file || preset.body);
     }
     const d = ui.draft;
     setBar(existing ? [[esc(ui.lastScope.label), ui.lastScope.hash], [esc(existing.title), `#/e/${existing.id}`], ['Edit']] : [[esc(ui.lastScope.label), ui.lastScope.hash], [`New ${KINDS[d.kind].label.toLowerCase()}`]],
-      `<span class="label">${existing ? 'Editing' : 'Not saved yet'}</span>`);
+      `<span class="label save-status" id="save-status" aria-live="polite">${existing ? 'Saves as you type' : 'Saves once it has a title or text'}</span>`);
     main.innerHTML = `<form class="edit-page" id="edit-form" autocomplete="off" novalidate>
       <div class="kind-pick" role="radiogroup" aria-label="Kind"><span class="label">Kind</span>
         ${KIND_ORDER.map(k => `<label><input type="radio" name="kind" value="${k}"${d.kind === k ? ' checked' : ''}><span class="p"><span class="g">${KINDS[k].glyph}</span>${KINDS[k].label}</span></label>`).join('')}
@@ -1281,10 +1362,10 @@
         </div>
       </div>
       <div class="edit-actions">
-        <button class="action action--primary" type="submit"><span class="dot"></span><span>${existing ? 'Save changes' : 'Save entry'}</span></button>
-        <button class="action" type="button" id="e-cancel"><span>Cancel</span></button>
-        ${existing ? '<button class="action action--danger" type="button" id="e-delete"><span>Delete</span></button>' : ''}
-        <span class="label hint">⌘S save · Esc cancel · [[ link an entry</span>
+        <button class="action action--primary" type="submit"><span class="dot"></span><span>Done</span></button>
+        <button class="action" type="button" id="e-cancel"><span>${existing ? 'Revert changes' : 'Discard'}</span></button>
+        <button class="action action--danger" type="button" id="e-delete"${ui.autoTarget ? '' : ' hidden'}><span>Delete</span></button>
+        <span class="label hint">Saves as you type · ⌘S or Esc done · [[ link an entry</span>
       </div>
     </form>`;
     wireEditor(existing);
@@ -1293,7 +1374,31 @@
   function wireEditor(existing) {
     const form = $('#edit-form'), d = ui.draft;
     const ta = $('#e-body'), pv = $('#e-preview'), editor = $('.editor', form);
-    const dirty = () => { ui.dirty = true; };
+    // Autosave: a moment after you stop typing, the entry is written to the archive
+    const status = $('#save-status');
+    const say = t => { if (status) status.textContent = t; };
+    let st = null;
+    const dirty = () => { ui.dirty = true; say('Unsaved changes'); clearTimeout(st); st = setTimeout(autosave, 1000); };
+    function autosave() {
+      clearTimeout(st); st = null;
+      if (!ui.draft || ui.draft !== d || !ui.dirty) return;
+      const target = ui.autoTarget, title = draftTitle(d);
+      if (!target && !title && !d.image && !d.file) { say('Saves once it has a title or text'); return; }
+      const clean = JSON.parse(JSON.stringify({ ...d, title: title || (target && target.title) || 'Untitled', updated: now() }));
+      delete clean._route;
+      if (clean.assets) Object.keys(clean.assets).forEach(id => { if (!clean.body.includes(`asset:${id}`)) delete clean.assets[id]; });
+      if (target) Object.assign(target, clean);
+      else {
+        // A new entry gets its place in the archive with the first save; the address follows
+        db.entries.push(clean); ui.autoTarget = clean;
+        const h = `#/e/${clean.id}/edit`; history.replaceState(null, '', h); d._route = h; ui.route = parseRoute();
+        const del = $('#e-delete'); if (del) del.hidden = false;
+      }
+      ui.dirty = false; ui.saving = (ui.saving || 0) + 1; say('Saving…');
+      persist().then(ok => { if (ok === false) { say('Not saved'); return; } if (!ui.dirty && ui.draft === d) say(`Saved ${new Date().toTimeString().slice(0, 5)}`); }).finally(() => { ui.saving--; });
+      renderSide();
+    }
+    ui.flushAutosave = () => { if (st || ui.dirty) autosave(); };
     const syncKind = () => {
       $$('[data-for]', form).forEach(f => { f.hidden = !f.dataset.for.split(' ').includes(d.kind); });
       $('#kind-help').textContent = KINDS[d.kind].help;
@@ -1312,6 +1417,7 @@
       $('#e-cols').innerHTML = d.collections.map(colById).filter(Boolean).map(c => `<span class="pill">${esc(c.name)}<button type="button" class="rm" data-uncol="${c.id}" aria-label="Remove from ${esc(c.name)}">×</button></span>`).join('');
     };
     syncKind(); drawMedia(); drawCols(); updatePreview(); requestAnimationFrame(grow);
+    if (ui.dirty) dirty();
     (d.title ? ta : $('#e-title')).focus({ preventScroll: true });
 
     form.addEventListener('input', e => {
@@ -1331,11 +1437,11 @@
     $('#e-cols').addEventListener('click', e => { const b = e.target.closest('[data-uncol]'); if (b) { d.collections = d.collections.filter(id => id !== b.dataset.uncol); drawCols(); dirty(); } });
     $('#dropbox').addEventListener('click', e => { if (e.target.closest('[data-clear]')) { e.preventDefault(); d.image = null; d.original = null; d.file = null; d.swatch = null; drawMedia(); dirty(); } });
     $('#e-media').addEventListener('change', async e => { const f = e.target.files[0]; if (f) { Object.assign(d, { image: null, original: null, file: null, swatch: null }, await readMedia(f)); drawMedia(); dirty(); } e.target.value = ''; });
-    $('#e-cancel').addEventListener('click', cancelEdit);
-    const del = $('#e-delete'); if (del) del.addEventListener('click', () => deleteEntries([existing.id]));
-    form.addEventListener('submit', e => { e.preventDefault(); saveDraft(existing); });
+    $('#e-cancel').addEventListener('click', revertEdit);
+    const del = $('#e-delete'); if (del) del.addEventListener('click', () => { ui.flushAutosave(); if (ui.autoTarget) deleteEntries([ui.autoTarget.id]); });
+    form.addEventListener('submit', e => { e.preventDefault(); saveDraft(); });
     form.addEventListener('keydown', e => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveDraft(existing); }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveDraft(); }
       if (e.key === 'Enter' && e.target.tagName === 'INPUT' && e.target.id !== 'e-col') e.preventDefault();
     });
     ui.setMedia = media => { Object.assign(d, { image: null, original: null, file: null, swatch: null }, media); drawMedia(); dirty(); };
@@ -1447,32 +1553,55 @@
     return out;
   }
 
-  function saveDraft(existing) {
-    const d = ui.draft;
+  // The title an entry gets: the one typed, or else its file, link or first sentence
+  function draftTitle(d) {
     let title = (d.title || '').trim();
     if (!title && d.file) title = d.file.name.replace(/\.[^.]+$/, '');
     if (!title && d.url) title = host(d.url);
-    if (!title && d.body.trim()) title = plain(d.body).split(/[.!?\n]/)[0].slice(0, 80).trim();
-    if (!title) { const t = $('#e-title'); t.focus(); t.placeholder = 'Give it a title first'; return; }
+    if (!title && (d.body || '').trim()) title = plain(d.body).split(/[.!?\n]/)[0].slice(0, 80).trim();
+    return title;
+  }
+  // Leaving the editor: write what is left, then update [[links]] to a new title and fetch a new link's preview
+  function finishEdit() {
+    if (!ui.draft) return null;
+    if (ui.flushAutosave) ui.flushAutosave();
+    const e = ui.autoTarget, orig = ui.draftOrig;
     let n = 0;
-    if (existing) n = renameEntry(existing, title);
-    if (d.assets) Object.keys(d.assets).forEach(id => { if (!d.body.includes(`asset:${id}`)) delete d.assets[id]; });
-    const clean = { ...d, title, updated: now() };
-    delete clean._route;
-    if (existing) Object.assign(existing, clean); else db.entries.push(clean);
-    persist();
-    if (clean.url && !clean.page && clean.url !== ui.draftUrl) enrich(clean);
-    ui.dirty = false; ui.draft = null; ui.skipGuard = true;
-    toast(existing ? (n ? `Saved · updated ${plural(n, 'link')}` : 'Saved') : 'Added to the archive');
-    go(`#/e/${clean.id}`);
+    if (e && orig && orig.title !== e.title) { n = renameEntry(e, e.title, orig.title); if (n) persist(); }
+    if (e && e.url && !e.page && e.url !== ui.draftUrl) enrich(e);
+    ui.dirty = false; ui.draft = null; ui.draftOrig = null; ui.autoTarget = null; ui.flushAutosave = null;
+    return { e, n };
+  }
+  function saveDraft() {
+    const d = ui.draft;
+    if (!ui.autoTarget && !draftTitle(d) && !d.image && !d.file) { const t = $('#e-title'); t.focus(); t.placeholder = 'Give it a title first'; return; }
+    ui.dirty = true;
+    const { e, n } = finishEdit();
+    ui.skipGuard = true;
+    if (n) toast(`Saved · updated ${plural(n, 'link')}`);
+    go(`#/e/${e.id}`);
   }
   function cancelEdit() {
-    if (ui.dirty && !confirmLeave()) return;
-    const r = ui.route; ui.dirty = false; ui.skipGuard = true;
-    go(r.id ? `#/e/${r.id}` : ui.lastScope.hash);
+    // Esc: everything is already saved, so this simply closes the editor
+    const d = ui.draft;
+    if (ui.autoTarget || (d && (draftTitle(d) || d.image || d.file))) return saveDraft();
+    ui.dirty = false; ui.draft = null; ui.skipGuard = true;
+    go(ui.lastScope.hash);
   }
-  // Leaving unsaved writing uses the browser's own confirm: it is synchronous, which hash navigation needs
-  const confirmLeave = () => confirm('Leave without saving? Your changes will be lost.');
+  async function revertEdit() {
+    const e = ui.autoTarget, orig = ui.draftOrig;
+    if (!e && !(ui.draft && (draftTitle(ui.draft) || ui.draft.image || ui.draft.file))) { ui.dirty = false; ui.draft = null; ui.skipGuard = true; return go(ui.lastScope.hash); }
+    const ok = await ask(orig ? { title: 'Revert changes?', body: 'The entry goes back to how it was when you opened the editor.', ok: 'Revert' }
+      : { title: 'Discard this entry?', body: 'It was already saved while you typed; this removes it again.', ok: 'Discard', danger: true });
+    if (!ok) return;
+    ui.flushAutosave = null;
+    if (orig && e) { Object.keys(e).forEach(k => { if (!(k in orig)) delete e[k]; }); Object.assign(e, orig); }
+    else if (e) db.entries = db.entries.filter(x => x !== e);
+    if (e) persist();
+    ui.dirty = false; ui.draft = null; ui.draftOrig = null; ui.autoTarget = null; ui.skipGuard = true;
+    toast(orig ? 'Reverted' : 'Discarded');
+    go(orig ? `#/e/${orig.id}` : ui.lastScope.hash);
+  }
 
   /* ================= media ================= */
   async function readMedia(file) {
@@ -1619,8 +1748,7 @@
   addEventListener('hashchange', () => {
     const prev = ui.route;
     const leaving = prev && prev.page === 'edit' && ui.draft && ui.draft._route !== location.hash;
-    if (leaving && ui.dirty && !ui.skipGuard && !confirmLeave()) { history.replaceState(null, '', ui.draft._route); return; }
-    if (leaving) { ui.draft = null; ui.dirty = false; }
+    if (leaving) { finishEdit(); ui.draft = null; ui.dirty = false; }
     ui.skipGuard = false;
     closeSide(); if (!newMenu.hidden) toggleNew(false);
     // Only the side view changed: keep the page as it is
@@ -1636,7 +1764,11 @@
     scrollTo({ top: 0 });
     if (ui.route.page !== 'edit' && !panelOpen()) main.focus({ preventScroll: true });
   });
-  addEventListener('beforeunload', e => { if (ui.dirty) { e.preventDefault(); e.returnValue = ''; } });
+  // Closing the tab: write what is waiting, and only hold the page while that save is still under way
+  addEventListener('beforeunload', e => {
+    if (ui.flushAutosave) ui.flushAutosave();
+    if (ui.dirty || ui.saving) { e.preventDefault(); e.returnValue = ''; }
+  });
   let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (ui.route && ui.route.page !== 'edit' && (prefs.display === 'graph' || ui.route.tab === 'lineage')) renderMain(); }, 150); });
 
   /* ================= footer: export, import, examples, reset ================= */
